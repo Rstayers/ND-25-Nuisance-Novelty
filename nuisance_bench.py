@@ -7,11 +7,19 @@ import torch
 from pathlib import Path
 from openood.evaluation_api import Evaluator
 from openood.networks.resnet50 import ResNet50
+from torchvision.models import vit_b_16, ViT_B_16_Weights
+from openood.networks.vit_b_16 import ViT_B_16
 
 # -----------------------------
 # Config
 # -----------------------------
-DEFAULT_DETECTORS = ["she"]
+DEFAULT_DETECTORS = ["vim"]
+                    # "fdbd",
+                     #"knn",
+                    # "odin",
+                     #"react",
+                     #"she",
+                    # "vim"]
 DEFAULT_FPRS = [0.01, 0.05, 0.1]
 
 
@@ -65,13 +73,13 @@ def _row(
     accept = int(score >= tau)
 
     if correct and not accept:
-        err = "nuisance_novelty"
+        err = "Full_Nuisance"
     elif correct and accept:
-        err = "correct_accept"
+        err = "Full_Correct"
     elif (not correct) and (not accept):
-        err = "misclass_reject"
+        err = "Partial_Nuisance"
     else:
-        err = "misclass_accept"
+        err = "Partial_Correct"
 
     return {
         "dataset": dataset,
@@ -121,13 +129,25 @@ def run(
     device = "cuda"
 
     # Load ResNet50 backbone
-    net = ResNet50(num_classes=1000)
-    ckpt = torch.load(
-        "data/imagenet_resnet50_base_e30_lr0.001_randaugment-2-9/s0/best.ckpt",
-        map_location=device,
-    )
-    net.load_state_dict(ckpt)
-    net.eval().to(device)
+    if backbone.lower() == "resnet50":
+        net = ResNet50(num_classes=1000)
+        ckpt_path = "data/imagenet_resnet50_base_e30_lr0.001_randaugment-2-9/s0/best.ckpt"
+        ckpt = torch.load(ckpt_path, map_location=device)
+        net.load_state_dict(ckpt)
+        net.eval().to(device)
+    elif backbone.lower() in ["vit", "vit_b_16"]:
+        tv_model = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+
+        net = ViT_B_16(num_classes=1000)
+        state_dict = tv_model.state_dict()
+
+        # Load into your wrapper
+        net.load_state_dict(state_dict, strict=False)
+        net.eval().to(device)
+    else:
+        raise ValueError(f"Unsupported backbone: {backbone}")
+
+
 
     trial_id = _trial_id()
     all_rows = []
@@ -222,11 +242,11 @@ def parse_args():
                     help="Root containing benchmark_imglist and images_* dirs")
     ap.add_argument("--out_dir", type=str, default="results/nuisance_runs",
                     help="Where to write CSV/JSON outputs")
-    ap.add_argument("--backbone", type=str, default="resnet50")
+    ap.add_argument("--backbone", type=str, default="vit")
     ap.add_argument("--detectors", type=str, nargs="*", default=DEFAULT_DETECTORS)
     ap.add_argument("--fprs", type=float, nargs="*", default=DEFAULT_FPRS)
-    ap.add_argument("--batch_size", type=int, default=128)
-    ap.add_argument("--num_workers", type=int, default=4)
+    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--num_workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
     return ap.parse_args()
 
