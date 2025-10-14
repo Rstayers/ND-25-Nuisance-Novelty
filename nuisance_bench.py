@@ -13,13 +13,9 @@ from openood.networks.vit_b_16 import ViT_B_16
 # -----------------------------
 # Config
 # -----------------------------
-DEFAULT_DETECTORS = ["vim"]
-                    # "fdbd",
-                     #"knn",
-                    # "odin",
-                     #"react",
-                     #"she",
-                    # "vim"]
+DEFAULT_DETECTORS = ["vim",
+                     "knn",
+                     "she"]
 DEFAULT_FPRS = [0.01, 0.05, 0.1]
 
 
@@ -128,7 +124,7 @@ def run(
     os.makedirs(out_dir, exist_ok=True)
     device = "cuda"
 
-    # Load ResNet50 backbone
+    # Load backbone
     if backbone.lower() == "resnet50":
         net = ResNet50(num_classes=1000)
         ckpt_path = "data/imagenet_resnet50_base_e30_lr0.001_randaugment-2-9/s0/best.ckpt"
