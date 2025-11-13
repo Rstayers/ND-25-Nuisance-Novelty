@@ -13,9 +13,7 @@ from openood.networks.vit_b_16 import ViT_B_16
 # -----------------------------
 # Config
 # -----------------------------
-DEFAULT_DETECTORS = ["vim",
-                     "knn",
-                     "she"]
+DEFAULT_DETECTORS = ["msp"]
 DEFAULT_FPRS = [0.01, 0.05, 0.1]
 
 
