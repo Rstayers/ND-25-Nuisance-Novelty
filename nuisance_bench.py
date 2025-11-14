@@ -123,7 +123,25 @@ def run(
     device = "cuda"
 
     # Load backbone
-    if backbone.lower() == "resnet50":
+    if backbone.lower() == "resnet50-psycho":
+        net = ResNet50(num_classes=1000)
+        ckpt_path = "results/psycho/best.pth"
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # Extract actual weights
+        if isinstance(ckpt, dict) and "net" in ckpt:
+            state = ckpt["net"]
+        else:
+            state = ckpt
+
+        # Load weights on CPU first
+        net.load_state_dict(state, strict=True)
+
+        # THEN move to GPU
+        net = net.to("cuda").eval()
+
+    elif backbone.lower() == "resnet50":
         net = ResNet50(num_classes=1000)
         ckpt_path = "data/imagenet_resnet50_base_e30_lr0.001_randaugment-2-9/s0/best.ckpt"
         ckpt = torch.load(ckpt_path, map_location=device)
@@ -236,7 +254,7 @@ def parse_args():
                     help="Root containing benchmark_imglist and images_* dirs")
     ap.add_argument("--out_dir", type=str, default="results/nuisance_runs",
                     help="Where to write CSV/JSON outputs")
-    ap.add_argument("--backbone", type=str, default="vit")
+    ap.add_argument("--backbone", type=str, default="resnet50-psycho")
     ap.add_argument("--detectors", type=str, nargs="*", default=DEFAULT_DETECTORS)
     ap.add_argument("--fprs", type=float, nargs="*", default=DEFAULT_FPRS)
     ap.add_argument("--batch_size", type=int, default=256)

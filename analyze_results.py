@@ -576,7 +576,7 @@ def main(csv_path: str, out_dir: str, fpr_focus: float):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", required=False, default="results/nuisance_runs/nuisance_full_set.csv", type=str, help="CSV from nuisance ImageNet-C runs (can include multiple backbones)")
+    ap.add_argument("--csv", required=False, default="results/nuisance_runs/nuisance_imagenet_c_e7c0c379.csv", type=str, help="CSV from nuisance ImageNet-C runs (can include multiple backbones)")
     ap.add_argument("--out_dir", type=str, default="results/analysis", help="Output directory")
     ap.add_argument("--fpr", type=float, default=0.05, help="FPR to focus plots on (e.g., 0.05)")
     args = ap.parse_args()

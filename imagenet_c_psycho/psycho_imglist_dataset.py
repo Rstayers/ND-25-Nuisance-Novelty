@@ -1,98 +1,127 @@
+# imagenet_c_psycho/psycho_imglist_dataset.py
 import os
+import re
+from typing import List, Tuple, Dict
+
 import torch
 from torch.utils.data import Dataset
-from openood.datasets.imglist_dataset import ImglistDataset
+from PIL import Image
+from torchvision import transforms
 
+_SEV_RE = re.compile(r'(?:/|\\)(?:severity[_-]?([1-5])|([1-5]))(?:/|\\)')
 
-class ImagenetCPsychoDataset(ImglistDataset):
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+def _read_imglist(imglist_file: str) -> List[Tuple[str, int]]:
+    out = []
+    with open(imglist_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # "<relpath> <label>"
+            rel, lab = line.rsplit(' ', 1)
+            out.append((rel, int(lab)))
+    return out
+
+def _severity_from_rel(relpath: str):
     """
-    Extension of OpenOOD's ImglistDataset for ImageNet-C with psychophysical weighting.
-    Each sample returns (image, label, perceptual_value) where perceptual_value is a
-    scalar in [0, 1] derived from corruption severity (1–5).
+    Matches both .../<corruption>/3/... and .../<corruption>/severity_3/...
+    Returns int in [1..5] or None for clean ImageNet.
+    """
+    m = _SEV_RE.search(relpath)
+    if not m:
+        return None
+    if m.group(1):
+        return int(m.group(1))
+    if m.group(2):
+        return int(m.group(2))
+    return None
+
+def _sev_to_weight(sev: int, eps: float = 0.05) -> float:
+    # Harder (higher severity) => penalize less:
+    # sev∈{1..5} -> w∈[eps,1], linear: w = eps + (1-eps)*(5-sev)/4
+    return eps + (1.0 - eps) * (5 - sev) / 4.0
+
+class PsychoImglistDataset(Dataset):
+    """
+    Standalone dataset:
+      - expects split_cfg with keys:
+          data_dir, imglist_pth, batch_size, shuffle, and optional:
+          inetc_weighting: {epsilon: float}
+      - returns dict with keys: data (tensor), label (int), impath (str), weight (float32)
     """
 
-    def __init__(self, config, split_name='train', **kwargs):
-        super().__init__(config, split_name=split_name, **kwargs)
+    def __init__(self, split_cfg: Dict, split_name: str = "train"):
+        self.split_name = split_name
+        self.data_dir = split_cfg["data_dir"]
+        self.imglist_pth = split_cfg["imglist_pth"]
+        self.samples = _read_imglist(self.imglist_pth)
 
-        # Load psychophysical weighting parameters
-        self.use_weights = config.get("use_perceptual_weights", True)
-        self.severity_weight_mode = config.get("severity_weight_mode", "inverse")
-        self.included_severities = config.get("included_severities", [1, 2, 3])
-        self.normalize_weights = config.get("normalize_weights", True)
+        iw = split_cfg.get("inetc_weighting", {}) or {}
+        self.eps = float(iw.get("epsilon", 0.05))
 
-        # Mapping for explicit weights (reaction-time inspired)
-        self.perceptual_weight_mapping = config.get("perceptual_weight_mapping", {
-            1: 1.0,
-            2: 0.85,
-            3: 0.65,
-            4: 0.45,
-            5: 0.25
-        })
+        # defaults
+        pre_size = split_cfg.get("pre_size", 256)
+        image_size = split_cfg.get("image_size", 224)
 
-        # Collect list of image paths and labels
-        self._filter_by_severity()
+        # optional augment section from top-level YAML (passed down by pipeline)
+        # if not present, we still default to eval transforms on non-train.
+        aug = split_cfg.get("__augment__", {})  # pipeline will inject this
 
-        # Compute normalization if needed
-        if self.normalize_weights:
-            weights = torch.tensor(list(self.perceptual_weight_mapping.values()), dtype=torch.float32)
-            self.min_w = float(weights.min())
-            self.max_w = float(weights.max())
-        else:
-            self.min_w = self.max_w = None
-
-    def _filter_by_severity(self):
-        """
-        Optionally filter dataset entries by severity level using folder names
-        like .../gaussian_noise/3/image.png.
-        """
-        filtered_data = []
-        for item in self.data:
-            path = item["img_path"]
-            try:
-                severity = int(os.path.normpath(path).split(os.sep)[-2])
-            except ValueError:
-                # If not an ImageNet-C corruption path, assume severity=1
-                severity = 1
-            if severity in self.included_severities:
-                filtered_data.append(item)
-        self.data = filtered_data
-
-    def _severity_to_weight(self, severity):
-        """
-        Convert corruption severity (1–5) to a perceptual weight scalar.
-        """
-        if not self.use_weights:
-            return 1.0
-
-        # Direct mapping if available
-        if severity in self.perceptual_weight_mapping:
-            weight = self.perceptual_weight_mapping[severity]
-        else:
-            # Fallback: simple inverse or linear scaling
-            if self.severity_weight_mode == "inverse":
-                weight = 1.0 / severity
-            elif self.severity_weight_mode == "linear":
-                weight = 1.0 - (severity - 1) / 4.0
+        if self.split_name == "train":
+            tfs = []
+            if aug.get("random_resized_crop", True):
+                from torchvision.transforms import InterpolationMode
+                tfs.append(
+                    transforms.RandomResizedCrop(image_size, interpolation=transforms.InterpolationMode.BILINEAR))
             else:
-                weight = 1.0
+                tfs += [
+                    transforms.Resize(pre_size, interpolation=transforms.InterpolationMode.BILINEAR),
+                    transforms.CenterCrop(image_size),
+                ]
+            if aug.get("random_horizontal_flip", True):
+                tfs.append(transforms.RandomHorizontalFlip())
 
-        # Normalize to [0, 1] if enabled
-        if self.normalize_weights and self.max_w > self.min_w:
-            weight = (weight - self.min_w) / (self.max_w - self.min_w)
+            ra = aug.get("randaugment", None)
+            if ra is not None:
+                tfs.append(transforms.RandAugment(num_ops=int(ra.get("num_ops", 2)),
+                                                  magnitude=int(ra.get("magnitude", 9))))
 
-        return float(weight)
+            tfs += [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
+            self.transform = transforms.Compose(tfs)
+        else:
+            # eval transforms
+            self.transform = transforms.Compose([
+                transforms.Resize(pre_size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ])
 
-    def __getitem__(self, idx):
-        """
-        Returns: image, label, perceptual_weight
-        """
-        img, label = super().__getitem__(idx)
-        path = self.data[idx]["img_path"]
+    def __len__(self):
+        return len(self.samples)
 
-        try:
-            severity = int(os.path.normpath(path).split(os.sep)[-2])
-        except ValueError:
-            severity = 1
+    def __getitem__(self, idx: int):
+        rel, label = self.samples[idx]
+        impath = os.path.join(self.data_dir, rel).replace('\\', '/')
+        with Image.open(impath) as img:
+            img = img.convert("RGB")
+            x = self.transform(img)
 
-        perceptual_value = self._severity_to_weight(severity)
-        return img, label, torch.tensor(perceptual_value, dtype=torch.float32)
+        sev = _severity_from_rel(rel)
+        if sev is None:
+            w = 1.0  # clean ImageNet
+        else:
+            w = _sev_to_weight(sev, self.eps)
+
+        return {
+            "data": x,
+            "label": torch.tensor(label, dtype=torch.long),
+            "impath": rel,
+            "weight": torch.tensor(w, dtype=torch.float32),
+        }

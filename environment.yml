@@ -21,6 +21,7 @@ dependencies:
   - json5
   - cython
   - statsmodels
+  - seaborn
   - pip:
       - numpy<2.0
       - faiss-cpu
