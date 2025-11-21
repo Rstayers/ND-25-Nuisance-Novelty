@@ -1,0 +1,50 @@
+dataset:
+  name: imagenet_c_psycho
+  num_classes: 1000
+
+  # Image sizes
+  pre_size: 256
+  image_size: 224
+
+  # torchvision defaults
+  interpolation: bilinear
+  normalization_type: imagenet
+
+  # Hardware-related
+  num_workers: "@{num_workers}"
+  num_gpus: "@{num_gpus}"
+  num_machines: "@{num_machines}"
+
+  split_names: [train, val, test]
+
+  # ---------- TRAIN SPLIT ----------
+  train:
+    dataset_class: PsychoImglistDataset
+    data_dir: ./data/images_largescale/
+    imglist_pth: "__INJECTED_BY_MAIN__"
+    batch_size: 128
+    shuffle: True
+
+    # Per-sample severity weighting
+    use_perceptual_weights: True
+    severity_weight_mode: inverse      # [inverse, linear, zscore]
+    included_severities: [1, 2, 3, 4, 5]
+    normalize_weights: True
+
+  # ---------- VAL SPLIT ----------
+  val:
+    dataset_class: PsychoImglistDataset
+    data_dir: ./data/images_largescale/
+    imglist_pth: "__INJECTED_BY_MAIN__"
+    batch_size: 128
+    shuffle: False
+    included_severities: [1, 2, 3, 4, 5]
+
+  # ---------- TEST SPLIT ----------
+  test:
+    dataset_class: PsychoImglistDataset
+    data_dir: ./data/images_largescale/
+    imglist_pth: "__INJECTED_BY_MAIN__"
+    batch_size: 128
+    shuffle: False
+    included_severities: [1, 2, 3, 4, 5]
