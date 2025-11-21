@@ -27,22 +27,42 @@ def _read_imglist(imglist_file: str) -> List[Tuple[str, int]]:
 
 def _severity_from_rel(relpath: str):
     """
-    Matches both .../<corruption>/3/... and .../<corruption>/severity_3/...
-    Returns int in [1..5] or None for clean ImageNet.
+    Works for ImageNet-C layout:
+        imagenet_c/<corruption>/<severity>/<image>
+    Returns None for clean images.
     """
-    m = _SEV_RE.search(relpath)
-    if not m:
-        return None
-    if m.group(1):
-        return int(m.group(1))
-    if m.group(2):
-        return int(m.group(2))
+    parts = relpath.replace("\\", "/").split("/")
+    for i, p in enumerate(parts):
+        # severity must be an int between 1 and 5
+        if p.isdigit():
+            sev = int(p)
+            if 1 <= sev <= 5:
+                return sev
     return None
 
-def _sev_to_weight(sev: int, eps: float = 0.05) -> float:
-    # Harder (higher severity) => penalize less:
-    # sev∈{1..5} -> w∈[eps,1], linear: w = eps + (1-eps)*(5-sev)/4
-    return eps + (1.0 - eps) * (5 - sev) / 4.0
+def _sev_to_weight(
+    sev: int,
+    w_min: float = 0.10,
+    w_max: float = 2,
+    inverse: bool = False
+) -> float:
+    """
+    Map severity s∈{1..5} to a weight in [w_min, w_max].
+
+    Default (inverse=False):
+        - s=1 -> w_max  (strongest penalty)
+        - s=5 -> w_min  (weakest penalty)
+    If inverse=True:
+        - s=1 -> w_min  (weakest penalty)
+        - s=5 -> w_max  (strongest penalty)
+
+    Clean images (sev=None) handled elsewhere with weight=1.0.
+    """
+    sev = max(1, min(5, int(sev)))
+    t = (5 - sev) / 4.0 if not inverse else (sev - 1) / 4.0
+    return w_min + (w_max - w_min) * t
+
+
 
 class PsychoImglistDataset(Dataset):
     """
@@ -60,8 +80,9 @@ class PsychoImglistDataset(Dataset):
         self.samples = _read_imglist(self.imglist_pth)
 
         iw = split_cfg.get("inetc_weighting", {}) or {}
-        self.eps = float(iw.get("epsilon", 0.05))
-
+        self.w_min = float(iw.get("w_min", 0.10))
+        self.w_max = float(iw.get("w_max", 2.00))
+        self.inverse = bool(iw.get("inverse", False))
         # defaults
         pre_size = split_cfg.get("pre_size", 256)
         image_size = split_cfg.get("image_size", 224)
@@ -117,7 +138,7 @@ class PsychoImglistDataset(Dataset):
         if sev is None:
             w = 1.0  # clean ImageNet
         else:
-            w = _sev_to_weight(sev, self.eps)
+            w = _sev_to_weight(sev, self.w_min, self.w_max, self.inverse)
 
         return {
             "data": x,

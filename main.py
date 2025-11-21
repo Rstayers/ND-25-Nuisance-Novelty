@@ -7,6 +7,37 @@ from datetime import datetime
 
 from imagenet_c_psycho.train_pipeline import TrainPipeline as Pipeline
 
+import glob
+import copy
+
+def expand_ratio_runs(cfg):
+    """
+    Returns a list of configs, one per ratio-split directory.
+    """
+    base_dir = "./data/benchmark_imglist/imagenet_c_psycho/"
+    ratio_dirs = sorted([
+        d for d in glob.glob(base_dir + "/*")
+        if os.path.isdir(d)
+    ])
+
+    expanded = []
+
+    for rdir in ratio_dirs:
+        ratio_name = os.path.basename(rdir)
+
+        new_cfg = copy.deepcopy(cfg)
+
+        # Replace imglist paths
+        new_cfg["dataset"]["train"]["imglist_pth"] = f"{rdir}/train_imagenet_c_psycho.txt"
+        new_cfg["dataset"]["val"]["imglist_pth"]   = f"{rdir}/val_imagenet_c_psycho.txt"
+        new_cfg["dataset"]["test"]["imglist_pth"]  = f"{rdir}/test_imagenet_c_psycho.txt"
+
+        # Tag experiment with ratio name
+        new_cfg["mark"] = ratio_name
+
+        expanded.append(new_cfg)
+
+    return expanded
 
 def setup_logging(save_dir: str):
     os.makedirs(save_dir, exist_ok=True)
@@ -87,8 +118,26 @@ def main():
     logger.info("Loaded config.")
     logger.info(cfg)
 
-    pipeline = Pipeline(cfg, save_dir, logger)
-    pipeline.run()
+    all_cfgs = expand_ratio_runs(cfg)
+
+    for sub_cfg in all_cfgs:
+        ratio = sub_cfg["mark"]
+        print(f"\n==============================")
+        print(f" TRAINING RATIO SPLIT: {ratio}")
+        print(f"==============================\n")
+
+        exp_name = f"{ratio}_{sub_cfg['network']['name']}"
+        save_dir = os.path.join(sub_cfg["output_dir"], exp_name)
+
+        # ✅ Skip if results already exist
+        if os.path.exists(save_dir) and os.path.isdir(save_dir):
+            print(f"Skipping {ratio} — results already exist at {save_dir}")
+            continue
+
+        os.makedirs(save_dir, exist_ok=True)
+        pipeline = Pipeline(sub_cfg, save_dir, logger)
+        pipeline.run()
+
 
 
 if __name__ == "__main__":

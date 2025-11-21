@@ -1,0 +1,17 @@
+postprocessor:
+  name: psycho
+  APS_mode: False
+  postprocessor_args:
+    psych_imglist_pth: ./data/benchmark_imglist/imagenet/test_imagenet_c.txt
+    psych_data_dir: ./data/images_largescale/
+    ft_batch_size: 32
+    ft_num_workers: 4
+    ft_epochs: 5
+    ft_lr: 0.001
+    ft_weight_decay: 0.0001
+    min_severity: 1
+    max_severity: 5
+    weight_min: 1
+    weight_max: 5
+    inverse: True
+    log_stats: True

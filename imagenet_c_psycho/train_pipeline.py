@@ -4,14 +4,14 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from openood.networks import ViT_B_16
 
 from torch.utils.data import DataLoader
 from torchvision import models
+from torchvision.models import vit_b_16, ViT_B_16_Weights
 
-# custom dataset
 from imagenet_c_psycho.psycho_imglist_dataset import PsychoImglistDataset
 
-# optional timm for ViT
 try:
     import timm
     _HAS_TIMM = True
@@ -33,8 +33,6 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = True
 
 
-# ------------ LR Scheduler Builder ------------
-
 def _build_scheduler(optimizer, cfg):
     sch = cfg.get("scheduler", {})
     name = (sch.get("name") or "multistep").lower()
@@ -49,8 +47,6 @@ def _build_scheduler(optimizer, cfg):
         )
     return None
 
-
-# ------------ Trainers ------------
 
 class _BaseTrainer:
     def __init__(self, net, loader, cfg, device, logger):
@@ -104,7 +100,6 @@ class _PsychophysicalTrainer(_BaseTrainer):
         self.net.train()
         total_loss, total_acc, n = 0, 0, 0
 
-        # nice per-batch progress bar
         pbar = tqdm(self.loader, desc="train", leave=False)
 
         for batch in pbar:
@@ -128,19 +123,14 @@ class _PsychophysicalTrainer(_BaseTrainer):
             total_acc += acc * bs
             n += bs
 
-            # update progress bar info
             pbar.set_postfix({
                 "batch_loss": f"{loss.item():.4f}",
                 "batch_acc": f"{acc:.4f}",
                 "lr": self.optim.param_groups[0]["lr"],
             })
 
-        # at end of epoch
         return total_loss / n, total_acc / n
 
-
-
-# ------------ Main Pipeline ------------
 
 class TrainPipeline:
     def __init__(self, cfg, save_dir, logger):
@@ -152,15 +142,12 @@ class TrainPipeline:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # loaders
         ds_cfg = cfg.get("dataset", {})
         self.train_loader = self._build_loader(ds_cfg.get("train", {}), ds_cfg, "train")
         self.val_loader = self._build_loader(ds_cfg.get("val", {}), ds_cfg, "val") if "val" in ds_cfg else None
 
-        # network
         self.net = self._build_network(cfg.get("network", {})).to(self.device)
 
-        # trainer type
         tname = cfg.get("trainer", {}).get("name", "").lower()
         if "psychophysical" in tname:
             self.trainer = _PsychophysicalTrainer(self.net, self.train_loader, cfg, self.device, logger)
@@ -171,11 +158,9 @@ class TrainPipeline:
 
         self.epochs = self.trainer.epochs
 
-        # checkpoint directory
         self.ckpt_dir = os.path.join(save_dir, "checkpoints")
         os.makedirs(self.ckpt_dir, exist_ok=True)
 
-    # ------ Loader Builder ------
     def _build_loader(self, split_cfg, root_cfg, split_name):
 
         cfg = dict(split_cfg)
@@ -193,24 +178,48 @@ class TrainPipeline:
         return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                           num_workers=workers, pin_memory=True, drop_last=False)
 
-    # ------ Network Builder ------
     def _build_network(self, net_cfg):
         name = net_cfg.get("name", "resnet50").lower()
         num_classes = _as_int(net_cfg.get("num_classes", 1000), 1000)
-        pretrained = bool(net_cfg.get("pretrained", False))
 
-        if name == "resnet50":
-            weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
-            model = models.resnet50(weights=weights)
-            model.fc = nn.Linear(model.fc.in_features, num_classes)
+        if name in ["resnet50", "resnet50_openood"]:
+            # Build base torchvision ResNet-50
+            model = models.resnet50(weights=None)
+            in_f = model.fc.in_features
+            model.fc = nn.Linear(in_f, num_classes)
+
+            # If using OpenOOD pretrained checkpoint:
+            ckpt_path = "data/imagenet_resnet50_base_e30_lr0.001_randaugment-2-9/s0/best.ckpt"
+            pretrained_flag = net_cfg.get("pretrained", False)
+
+            if pretrained_flag and ckpt_path is not None and os.path.exists(ckpt_path):
+                print(f"Loading OpenOOD checkpoint: {ckpt_path}")
+                ckpt = torch.load(ckpt_path, map_location="cpu")
+
+                # OpenOOD checkpoints store params under "net"
+                state_dict = ckpt.get("net", ckpt)
+                missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+                print("Loaded OpenOOD ResNet-50 with:")
+                print(f"  missing keys: {missing}")
+                print(f"  unexpected keys: {unexpected}")
+
+            return model
+        elif name in ["vit"]:
+            model = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+
+            net = ViT_B_16(num_classes=1000)
+            state_dict = model.state_dict()
+
+            # Load into your wrapper
+            net.load_state_dict(state_dict, strict=False)
             return model
 
         if _HAS_TIMM:
-            return timm.create_model(name, pretrained=pretrained, num_classes=num_classes)
+            return timm.create_model(name, pretrained=False, num_classes=num_classes)
 
         raise ValueError(f"Unsupported model: {name}")
 
-    # ------ Checkpoint ------
     def _save_ckpt(self, tag, extra=None):
         path = os.path.join(self.ckpt_dir, f"{tag}.pth")
         torch.save({
@@ -220,7 +229,6 @@ class TrainPipeline:
         }, path)
         self.logger.info(f"Saved checkpoint: {path}")
 
-    # ------ Training Loop ------
     def run(self):
         best_val = float("inf")
         best_epoch = -1
@@ -230,14 +238,12 @@ class TrainPipeline:
             t0 = time.time()
             train_loss, train_acc = self.trainer.train_one_epoch()
 
-            # step scheduler once per epoch
             if self.trainer.sched is not None:
                 self.trainer.sched.step()
 
             self.logger.info(f"Epoch {ep:03d} | train_loss={train_loss:.4f} | train_acc={train_acc:.4f} | t={time.time()-t0:.1f}s")
             last_loss = train_loss
 
-            # ------ validation ------
             if self.val_loader is not None:
                 self.net.eval()
                 vloss, vacc, n = 0, 0, 0

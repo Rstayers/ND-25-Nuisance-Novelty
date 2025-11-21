@@ -1,58 +1,50 @@
 dataset:
   name: imagenet_c_psycho
   num_classes: 1000
+
+  # Image sizes
   pre_size: 256
   image_size: 224
 
+  # torchvision defaults
   interpolation: bilinear
   normalization_type: imagenet
 
-  num_workers: '@{num_workers}'
-  num_gpus: '@{num_gpus}'
-  num_machines: '@{num_machines}'
+  # Hardware-related
+  num_workers: "@{num_workers}"
+  num_gpus: "@{num_gpus}"
+  num_machines: "@{num_machines}"
 
   split_names: [train, val, test]
 
   # ---------- TRAIN SPLIT ----------
-  # Mixture of clean ImageNet and ImageNet-C (severities 1–3)
   train:
-    dataset_class: ImagenetCPsychoDataset
+    dataset_class: PsychoImglistDataset
     data_dir: ./data/images_largescale/
-    imglist_pth: ./data/benchmark_imglist/imagenet_c_psycho/train_imagenet_c_psycho.txt
+    imglist_pth: "__INJECTED_BY_MAIN__"
     batch_size: 128
     shuffle: True
 
-    # Custom psychophysical weighting parameters
+    # Per-sample severity weighting
     use_perceptual_weights: True
-    severity_weight_mode: "inverse"   # options: [inverse, linear, zscore]
-    included_severities: [1, 2, 3]    # training severities
+    severity_weight_mode: inverse      # [inverse, linear, zscore]
+    included_severities: [1, 2, 3, 4, 5]
     normalize_weights: True
 
-  # ---------- VALIDATION SPLIT ----------
+  # ---------- VAL SPLIT ----------
   val:
-    dataset_class: ImagenetCPsychoDataset
+    dataset_class: PsychoImglistDataset
     data_dir: ./data/images_largescale/
-    imglist_pth: ./data/benchmark_imglist/imagenet_c_psycho/val_imagenet_c_psycho.txt
+    imglist_pth: "__INJECTED_BY_MAIN__"
     batch_size: 128
     shuffle: False
-    included_severities: [4]
+    included_severities: [1, 2, 3, 4, 5]
 
   # ---------- TEST SPLIT ----------
-  # Test on unseen (higher-severity) ImageNet-C corruptions
   test:
-    dataset_class: ImagenetCPsychoDataset
+    dataset_class: PsychoImglistDataset
     data_dir: ./data/images_largescale/
-    imglist_pth: ./data/benchmark_imglist/imagenet_c_psycho/test_imagenet_c_psycho.txt
+    imglist_pth: "__INJECTED_BY_MAIN__"
     batch_size: 128
     shuffle: False
-    included_severities: [5]
-
-  # ---------- OPTIONAL METADATA ----------
-  # This block is ignored by OpenOOD’s core but used by your custom trainer.
-  perceptual_weight_mapping:
-    # severity : relative weight (1.0 = strongest penalty)
-    1: 1.0
-    2: 0.85
-    3: 0.65
-    4: 0.45
-    5: 0.25
+    included_severities: [1, 2, 3, 4, 5]
