@@ -19,6 +19,30 @@ def _iter_metadata_lines(metadata_files: List[Path]) -> Iterable[Dict]:
                 line = line.strip()
                 if line:
                     yield json.loads(line)
+def _load_label_map_from_cifar_imagelist(imagelist_path: Path) -> Dict[str, int]:
+    """
+    Load mapping from *full relative path* (e.g. 'cifar100/test/lamp/0037.png')
+    to class index, using an existing CIFAR imagelist file:
+        <relpath> <label>
+    """
+    imagelist_path = imagelist_path.expanduser().resolve()
+    if not imagelist_path.is_file():
+        raise FileNotFoundError(f"Label-source imagelist not found: {imagelist_path}")
+
+    label_map: Dict[str, int] = {}
+    with imagelist_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            relpath, label_str = line.split()
+            label = int(label_str)
+            # Key is the full relative path string, matching 'orig_relpath' in CIFAR-LN metadata
+            label_map[relpath] = label
+
+    if not label_map:
+        raise ValueError(f"No entries loaded from {imagelist_path}")
+    return label_map
 
 def _load_label_map_from_csv_synset(csv_path: Path, synset_map: Dict[str, int]) -> Dict[str, int]:
     """
@@ -406,8 +430,8 @@ def make_imagelist(
                   synset->index file
     """
     label_mode = label_mode.lower()
-    if label_mode not in {"constant", "imagenet", "synset"}:
-        raise ValueError("label_mode must be one of: constant, imagenet, synset")
+    if label_mode not in {"constant", "imagenet", "synset", "cifar100"}:
+        raise ValueError("label_mode must be one of: constant, imagenet, synset, cifar100")
 
     label_map: Dict[str, int] = {}
     synset_map: Dict[str, int] = {}
@@ -428,7 +452,10 @@ def make_imagelist(
         synsets = list(synset_map.keys())
         # image-id -> label (via synset)
         label_map = _load_label_map_from_csv_synset(csv_labels, synset_map)
-
+    elif label_mode == "cifar100":
+        if label_source is None:
+            raise ValueError("--label-source is required for label-mode=cifar100")
+        label_map = _load_label_map_from_cifar_imagelist(label_source)
     dataset_prefix = dataset_prefix.strip().strip("/")
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -471,7 +498,13 @@ def make_imagelist(
                 # Optional sanity check: ensure label index is in range
                 if synsets and not (0 <= label < len(synsets)):
                     continue
-
+            elif label_mode == "cifar100":
+                # Use full orig_relpath as key, to avoid basename collisions
+                orig_rel = rec.get("orig_relpath", "")
+                label = label_map.get(orig_rel)
+                if label is None:
+                    # no mapping for this image; skip
+                    continue
             out_f.write(f"{rel_path} {label}\n")
             n_written += 1
 
@@ -493,7 +526,7 @@ def main():
     parser.add_argument("--dataset-prefix", type=str, default="imagenet_ln",
                         help="Prefix before ln_relpath in imagelist paths.")
     parser.add_argument("--label-mode", type=str, default="constant",
-                        choices=["constant", "imagenet", "synset"],
+                        choices=["constant", "imagenet", "synset", "cifar100"],
                         help="Label mode: constant / imagenet / synset.")
     parser.add_argument("--constant-label", type=int, default=0,
                         help="Label for constant mode.")
