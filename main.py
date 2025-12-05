@@ -27,14 +27,9 @@ from datasets import (
 )
 from metrics_summary import compute_ood_metrics, build_metrics_row
 
-from openood.postprocessors import base_postprocessor, get_postprocessor
-from psycho_postprocessor.psycho_postprocessor import PsychoPostprocessor
 
-from openood.evaluation_api.postprocessor import postprocessors
 
-postprocessors['psycho'] = PsychoPostprocessor
-
-DEFAULT_DETECTORS = ["psycho", "msp"]
+DEFAULT_DETECTORS = ["msp"]
 DEFAULT_FPRS = [0.01, 0.05, 0.1]
 
 
@@ -107,7 +102,7 @@ def run_benchmark(
 
             evaluator = Evaluator(
                 net=net,
-                id_name="imagenet",
+                id_name=args.id_name,
                 data_root=data_root,
                 config_root="configs",
                 preprocessor=None,
@@ -304,15 +299,15 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", type=str, default="data",
                     help="Root directory (contains images_largescale, benchmark_imglist, etc.)")
+    ap.add_argument("--id_name", type=str, default="imagenet")
+
     ap.add_argument("--out_dir", type=str, default="results/ood_runs/psycho",
                     help="Where to write CSV/JSON outputs")
     ap.add_argument("--backbones", nargs="+",
                     default=[
-                        #"resnet50-psycho-50clean_50c",
                         "resnet50",
                         "vit"
-                        #"resnet50-psycho-60clean_40c",
-                        #"resnet50-psycho-0clean_100c",
+
                     ],
                     help="Backbones to evaluate (including psycho variants)")
     ap.add_argument("--detectors", nargs="*", default=DEFAULT_DETECTORS,
@@ -325,9 +320,10 @@ def parse_args():
     ap.add_argument(
         "--datasets",
         nargs="*",
-        default=["cns", "imagenet_c", "ninco"],
+        default=["cns", "imagenet_c", "imagenet_ln"],
         help="Datasets to evaluate (must be keys in DATASET_REGISTRY)",
     )
+
     return ap.parse_args()
 
 
