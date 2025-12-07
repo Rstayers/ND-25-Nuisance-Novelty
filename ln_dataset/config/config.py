@@ -101,7 +101,7 @@ DEFAULT_STICKER_SCHEDULE: Dict[int, SeverityLevel] = {
 }
 
 MAX_IMAGE_COVERAGE: float = 0.30  # hard upper bound on sticker area
-MAX_SAMPLING_ATTEMPTS: int = 20   # per (image, severity)
+MAX_SAMPLING_ATTEMPTS: int = 100  # or 200
 
 
 def get_severity_levels(levels: Optional[List[int]] = None) -> Dict[int, SeverityLevel]:
