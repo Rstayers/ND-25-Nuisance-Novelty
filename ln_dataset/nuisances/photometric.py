@@ -1,7 +1,6 @@
 import torch
 import torchvision.transforms.functional as TF
 
-
 class LocalPhotometricNuisance:
     def __init__(self, mode, severity):
         """
@@ -11,13 +10,6 @@ class LocalPhotometricNuisance:
         """
         self.mode = mode
         self.severity = severity
-
-        # Default Lookups (Pre-calibration placeholders)
-        self.params = {
-            'brightness': [0.15, 0.25, 0.35, 0.45, 0.55],  # Additive shift
-            'contrast': [0.85, 0.70, 0.55, 0.40, 0.25],  # Factor (1.0 = Original)
-            'saturation': [0.80, 0.60, 0.40, 0.20, 0.00],  # Factor (0.0 = Grayscale)
-        }
 
     def apply(self, img_tensor, mask, manual_param=None):
         """
@@ -30,26 +22,29 @@ class LocalPhotometricNuisance:
         if manual_param is not None:
             factor = manual_param
         else:
-            # Fallback to severity lookup
-            # Clamp severity 1-5 to index 0-4
-            idx = max(0, min(self.severity - 1, 4))
-            factor = self.params[self.mode][idx]
+            # Fallback (Should be unused in optimization loop)
+            factor = 1.0
 
         # 2. Generate Nuisance Image
         if self.mode == 'brightness':
-            # Additive brightness (glare)
+            # Additive brightness (0.0 to 1.0)
+            # Literature Fig 17: "Increased Brightness"
             nuisance_img = torch.clamp(img_tensor + factor, 0, 1)
 
         elif self.mode == 'contrast':
-            # Move towards mean (grey)
+            # Multiplicative (1.0 -> 0.0)
+            # Literature Fig 16: "Reduced Contrast"
             mean = img_tensor.mean()
             nuisance_img = (img_tensor - mean) * factor + mean
             nuisance_img = torch.clamp(nuisance_img, 0, 1)
 
         elif self.mode == 'saturation':
-            # TF.adjust_saturation expects tensor in [0,1]
+            # Saturation Factor (1.0 -> 3.0+)
+            # Literature Fig 20: "Increased Saturation"
+            # TF.adjust_saturation expects shape [..., H, W]
             nuisance_img = TF.adjust_saturation(img_tensor, factor)
+            nuisance_img = torch.clamp(nuisance_img, 0, 1)
 
-        # 3. Blend based on Competency Mask
+        # 3. Blend: Only apply to High Competency regions
         output = img_tensor * (1 - mask) + nuisance_img * mask
         return output
