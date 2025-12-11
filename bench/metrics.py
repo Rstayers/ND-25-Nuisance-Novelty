@@ -1,84 +1,52 @@
-# psycho_bench/metrics_summary.py
-
-from typing import Dict, Any
-
 import numpy as np
-from openood.evaluators.metrics import compute_all_metrics
+import torch
 
 
-def compute_ood_metrics(
-    id_pred: np.ndarray,
-    id_conf: np.ndarray,
-    id_gt: np.ndarray,
-    ood_pred: np.ndarray,
-    ood_conf: np.ndarray,
-    ood_gt: np.ndarray,
-) -> Dict[str, float]:
+def compute_id_threshold(confidences, tpr=0.95):
     """
-    Wrapper around OpenOOD's compute_all_metrics that supports both
-    5-value and 9-value return formats.
+    Determines the threshold where 95% (TPR) of CLEAN ID data is accepted.
     """
-    from openood.evaluators.metrics import compute_all_metrics
+    # Sort confidences
+    confidences = np.sort(confidences)
 
-    pred = np.concatenate([id_pred, ood_pred])
-    conf = np.concatenate([id_conf, ood_conf])
-    label = np.concatenate([id_gt, ood_gt])
+    # Index for the cutoff (e.g., bottom 5% are rejected)
+    cutoff_index = int(len(confidences) * (1 - tpr))
+    threshold = confidences[cutoff_index]
 
-    result = compute_all_metrics(conf, label, pred)
-
-    # Handle both possible output lengths
-    if len(result) == 9:
-        fpr95, auroc, aupr_in, aupr_out, ccr_4, ccr_3, ccr_2, ccr_1, acc = result
-        return {
-            "fpr95": float(fpr95),
-            "auroc": float(auroc),
-            "aupr_in": float(aupr_in),
-            "aupr_out": float(aupr_out),
-            "ccr_4": float(ccr_4),
-            "ccr_3": float(ccr_3),
-            "ccr_2": float(ccr_2),
-            "ccr_1": float(ccr_1),
-            "acc": float(acc),
-        }
-
-    elif len(result) == 5:
-        fpr95, auroc, aupr_in, aupr_out, acc = result
-        return {
-            "fpr95": float(fpr95),
-            "auroc": float(auroc),
-            "aupr_in": float(aupr_in),
-            "aupr_out": float(aupr_out),
-            "acc": float(acc),
-            "ccr_4": np.nan,
-            "ccr_3": np.nan,
-            "ccr_2": np.nan,
-            "ccr_1": np.nan,
-        }
-
-    else:
-        raise ValueError(f"Unexpected return length from compute_all_metrics: {len(result)}")
+    return threshold
 
 
-def build_metrics_row(
-    dataset_name: str,
-    backbone: str,
-    detector: str,
-    metrics: Dict[str, float],
-    n_id: int,
-    n_ood: int,
-    subset: str = "ALL",
-) -> Dict[str, Any]:
+def classify_outcomes(is_correct_arr, confidences, threshold):
     """
-    Build a summary row similar to OpenOOD's OOD evaluation CSV,
-    but augmented with backbone, detector, dataset, subset.
+    Vectorized classification of the 4 Outcome Types.
+
+    Returns counts dictionary.
     """
-    row: Dict[str, Any] = {
-        "backbone": backbone,
-        "detector": detector,
-        "dataset": dataset_name,
-        "subset": subset,
-        "n_id": int(n_id),
-        "n_ood": int(n_ood),
+    # Boolean masks
+    is_accepted = (confidences >= threshold)
+    is_rejected = ~is_accepted
+    is_wrong = ~is_correct_arr
+
+    # 1. Clean Success (Correct & Accepted)
+    # The system works as intended.
+    n_clean_success = np.sum(is_correct_arr & is_accepted)
+
+    # 2. Nuisance Novelty (Correct & Rejected) -> THE GOAL
+    # The model got it right, but was rightfully uncertain due to the nuisance.
+    n_nuisance_novelty = np.sum(is_correct_arr & is_rejected)
+
+    # 3. Double Failure (Wrong & Rejected) -> Safe Fail
+    # The model failed, but the detector caught it. System remains safe.
+    n_double_failure = np.sum(is_wrong & is_rejected)
+
+    # 4. Contained Misidentification (Wrong & Accepted) -> DANGER
+    # The model failed and was confident about it. Safety hazard.
+    n_contained_misid = np.sum(is_wrong & is_accepted)
+
+    return {
+        "Clean_Success": n_clean_success,
+        "Nuisance_Novelty": n_nuisance_novelty,
+        "Double_Failure": n_double_failure,
+        "Contained_Misidentification": n_contained_misid,
+        "Total": len(confidences)
     }
-    row.update(metrics)
-    return row

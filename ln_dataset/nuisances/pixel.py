@@ -1,9 +1,8 @@
 import torch
 import torch.nn.functional as F
 
-
 class LocalPixelationNuisance:
-    def __init__(self, severity):
+    def __init__(self, severity=1):
         self.severity = severity
         # Downsample ratios (keep 90% ... keep 10%)
         self.ratios = [0.9, 0.7, 0.5, 0.3, 0.1]
@@ -11,10 +10,15 @@ class LocalPixelationNuisance:
     def apply(self, img_tensor, mask, manual_param=None):
         """
         Args:
-            manual_param: float (0.0 to 1.0), the downsample ratio.
+            manual_param: float [0.0, 1.0] representing SEVERITY.
+                          0.0 = No change (Ratio 1.0)
+                          1.0 = Max Pixelation (Ratio ~0.05)
         """
         if manual_param is not None:
-            ratio = manual_param
+            # Map severity [0, 1] to Ratio [1.0, 0.05]
+            # We enforce a tiny minimum (0.02) to prevent 0x0 size errors
+            ratio = 1.0 - (manual_param * 0.98)
+            ratio = max(0.02, ratio)
         else:
             idx = max(0, min(self.severity - 1, 4))
             ratio = self.ratios[idx]
