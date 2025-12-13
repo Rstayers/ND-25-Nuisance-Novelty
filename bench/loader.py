@@ -5,6 +5,14 @@ from torchvision import transforms
 
 from bench.datasets import get_dataset_config
 
+import os
+import random  # <--- Add import
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from torchvision import transforms
+
+from bench.datasets import get_dataset_config
+
 
 class ConfigurableDataset(Dataset):
     def __init__(self, name, transform=None):
@@ -17,26 +25,37 @@ class ConfigurableDataset(Dataset):
         self.root = config['root']
         parser_func = config['parser']
 
+        # Check for sample limit
+        num_samples = config.get('num_samples', None)  # <--- New Config Option
+
         # 2. Parse List
         if not os.path.exists(config['imglist']):
-            # Fallback: check if path is relative to cwd
-            if os.path.exists(config['imglist']):
-                list_path = config['imglist']
-            else:
-                raise FileNotFoundError(f"Imglist for {name} not found at {config['imglist']}")
-        else:
-            list_path = config['imglist']
+            # ... (keep existing fallback logic) ...
+            pass
 
+        list_path = config['imglist']
+
+        # --- MODIFIED LOADING LOGIC ---
         with open(list_path, 'r') as f:
-            for line in f:
-                if not line.strip(): continue
-                item = parser_func(line, self.root)
-                if item['nuisance'] == 'clean_ood':
-                    item['nuisance'] = name
-                self.samples.append(item)
+            lines = f.readlines()
+
+        # Deterministic Sampling (Critical for OOSA Threshold Stability)
+        if num_samples is not None and len(lines) > num_samples:
+            print(f"[{name}] Downsampling from {len(lines)} to {num_samples} (Seed=42)...")
+            random.seed(42)
+            lines = random.sample(lines, num_samples)
+
+        for line in lines:
+            if not line.strip(): continue
+            item = parser_func(line, self.root)
+            if item['nuisance'] == 'clean_ood':
+                item['nuisance'] = name
+            self.samples.append(item)
+        # ------------------------------
 
     def __len__(self):
         return len(self.samples)
+
 
     def __getitem__(self, idx):
         item = self.samples[idx]
@@ -46,6 +65,7 @@ class ConfigurableDataset(Dataset):
             img = Image.open(full_path).convert('RGB')
         except:
             # Silent fallback black image to keep bench running
+            print("black image")
             img = Image.new('RGB', (224, 224))
 
         if self.transform:

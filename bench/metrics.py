@@ -2,6 +2,38 @@ import numpy as np
 import torch
 
 
+def compute_oosa_threshold(id_confs, ood_confs, id_correct_mask=None, steps=2000):
+    """
+    Finds threshold that maximizes OOSA.
+    OOSA = (Correctly Classified ID & Accepted + OOD Rejected) / Total
+    """
+    if id_correct_mask is None:
+        id_correct_mask = np.ones(len(id_confs), dtype=bool)
+
+    # Candidate thresholds
+    all_scores = np.concatenate([id_confs, ood_confs])
+
+    thresholds = np.unique(all_scores)
+
+    t = thresholds[:, None]
+
+    # ID Component: Must be (Correct Class) AND (Confidence >= Threshold)
+    # Shape: [n_thresh, n_id]
+    id_accepted = (id_confs[None, :] >= t)
+    # Mask out the ones that were wrong class to begin with
+    id_success = id_accepted & id_correct_mask[None, :]
+    id_count = id_success.sum(axis=1)
+
+    # OOD Component: Must be (Confidence < Threshold)
+    ood_rejected = (ood_confs[None, :] < t).sum(axis=1)
+
+    # OOSA
+    total = len(id_confs) + len(ood_confs)
+    oosa_scores = (id_count + ood_rejected) / total
+
+    best_idx = np.argmax(oosa_scores)
+    return thresholds[best_idx], oosa_scores[best_idx]
+
 def compute_id_threshold(confidences, tpr=0.95):
     """
     Determines the threshold where 95% (TPR) of CLEAN ID data is accepted.

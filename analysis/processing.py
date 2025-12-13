@@ -12,36 +12,44 @@ def load_and_prep(csv_path):
     return df, required_outcomes
 
 
+# processing.py
+
 def compute_aggregates(df):
     """
-    Aggregates row-level data into counts/rates per group.
+    Aggregates row-level data and calculates key metrics:
+    - Accuracy (Class Correctness)
+    - Rejection Rate (Detector Sensitivity)
+    - OSA (Operational Open-Set Accuracy)
+    - CNR (Correct Nuisance Rejection)
     """
     cols = ['backbone', 'detector', 'dataset', 'nuisance', 'level', 'outcome']
     agg = df.groupby(cols).size().unstack(fill_value=0).reset_index()
 
+    # Ensure columns exist
     for col in ["Clean_Success", "Nuisance_Novelty", "Double_Failure", "Contained_Misidentification"]:
         if col not in agg.columns: agg[col] = 0
 
-    # Total
+    # Total Samples per group
     agg['Total'] = (agg['Clean_Success'] + agg['Nuisance_Novelty'] +
                     agg['Double_Failure'] + agg['Contained_Misidentification'])
 
-    # Accuracy (CS + NN) / Total
+    # 1. Standard Accuracy (ignoring rejection)
     agg['Accuracy'] = (agg['Clean_Success'] + agg['Nuisance_Novelty']) / agg['Total']
 
-    # Rejection Rate (NN + DF) / Total
+    # 2. Rejection Rate
     agg['Rejection_Rate'] = (agg['Nuisance_Novelty'] + agg['Double_Failure']) / agg['Total']
 
-    # Conditional Nuisance Rate (CNR) - Formerly CRR
-    # P(Rejected | Correct)
-    correct_total = agg['Nuisance_Novelty'] + agg['Clean_Success']
+    # 3. OSA (Operational Open-Set Accuracy)
+    # For ID/Nuisance: The rate of "Clean Success" (Correct Class + Accepted)
+    agg['OSA'] = agg['Clean_Success'] / agg['Total']
+
+    # 4. CNR (Correct Nuisance Rejection)
+    # Of the samples correctly classified, what % were rejected?
+    # (High CNR = Good Safety/Warning behavior)
+    correct_total = agg['Clean_Success'] + agg['Nuisance_Novelty']
+    # Avoid Division by Zero
     agg['CNR'] = agg['Nuisance_Novelty'] / correct_total
     agg['CNR'] = agg['CNR'].fillna(0.0)
-
-    # Safety Recall (SR)
-    incorrect_total = agg['Double_Failure'] + agg['Contained_Misidentification']
-    agg['SR'] = agg['Double_Failure'] / incorrect_total
-    agg['SR'] = agg['SR'].fillna(1.0)
 
     return agg
 

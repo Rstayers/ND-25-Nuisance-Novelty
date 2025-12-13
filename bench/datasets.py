@@ -175,14 +175,37 @@ DATASET_ZOO = {
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v2.txt",
         "parser": parse_ln_manifest
     },
-
+    "LN_v1": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln.txt",
+        "parser": parse_ln_manifest
+    },
     # --- ID DATASETS ---
     "ImageNet-Val": {
         "root": f"{DATA_ROOT_DEFAULT}",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/val_imagenet.txt",
         "parser": parse_standard_ood
     },
+    # --- SURROGATE FOR OOSA (COSTARR Setup) ---
+    "OpenImage-O-Surrogate": {
+        # This points to the 10k image subset used for validation
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",  # Ensure this list has ~10k images
+        "parser": parse_standard_ood,
+        "num_samples": 10000
+    },
 
+    # --- ID VALIDATION (COSTARR Setup) ---
+    "ImageNetV2-Val": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_v2.txt",  # V2 usually has 10k images
+        "parser": parse_standard_ood
+    },
+    "ImageNet-Train": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/train_imagenet.txt",
+        "parser": parse_standard_ood
+    },
     # --- ROBUSTNESS BENCHMARKS ---
     "ImageNet-C": {
         "root": f"{DATA_ROOT_DEFAULT}",

@@ -1,3 +1,5 @@
+from typing import List, Tuple, Optional
+
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 from cycler import cycler
@@ -80,9 +82,9 @@ def OSA(gt: torch.Tensor, pred: torch.Tensor, prob: torch.Tensor, thresh: float,
         thresh_mask = unique_prob < thresh
         thresh_idx = torch.argmax(thresh_mask)
         osa_score = total_accuracy[thresh_idx]
-        print('Max OSA', title, osa_score.item())
+        print('Max OSA', plt.title, osa_score.item())
         
-        return (total_accuracy, URR, title, thresh_idx), osa_score.item()
+        return (total_accuracy, URR, plt.title, thresh_idx), osa_score.item()
     
     # If threshold is not known, compute and return it.
     else:

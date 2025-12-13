@@ -70,19 +70,21 @@ def run_inference(model, postprocessor, loader, device, desc=""):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--backbones', nargs='+', default=['resnet50', 'vit_b_16'])
-    parser.add_argument('--detectors', nargs='+', default=['msp', 'react', 'ash'])
-    parser.add_argument('--id_dataset', default="ImageNet-Val")
-    parser.add_argument('--test_datasets', nargs='+', required=True)
+    parser.add_argument('--backbones', nargs='+', default=['vit_b_16', 'resnet50'])
+    parser.add_argument('--detectors', nargs='+', default=[ 'gradnorm', 'ebo','msp', 'react', 'ash'])
+    parser.add_argument('--id_dataset', default="ImageNet-Test")
+    parser.add_argument('--test_datasets', nargs='+', default=['LN_v1', 'ImageNet-C', 'LN_v2'])
     parser.add_argument('--out_dir', default="analysis/bench_results")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # 1. Load ID Loader (Calibration)
-    print(f"Loading ID Dataset: {args.id_dataset}")
-    id_loader = get_loader(args.id_dataset)
+    print("Loading ID Dataset (Train) for Detector Setup...")
+    # NOTE: You might want a smaller subset if Train is too huge for KNN (1.2M images)
+    # But for MDS, using the full train set is standard.
+    id_loader_train = get_loader("ImageNet-Train", batch_size=64)
+    id_loader_val = get_loader("ImageNet-Val", batch_size=64)
 
     # 2. Load Test Loaders
     test_loaders = []
@@ -93,6 +95,7 @@ def main():
     all_rows = []
 
     # 3. Main Loop
+    # 3. Main Loop
     for bb_name in args.backbones:
         print(f"\n=== Backbone: {bb_name} ===")
         model = load_backbone(bb_name, device)
@@ -101,30 +104,41 @@ def main():
             print(f"--- Detector: {det_name} ---")
             detector = get_detector(det_name)
 
-            # A. SETUP (Critical Fix)
-            # ReAct/ASH need to see ID data to calculate statistics.
-            # OpenOOD expects a dict: {'val': loader} or {'id': loader}
-            print(f"[{det_name}] Calibrating statistics on ID data...")
-            detector.setup(model, {'val': id_loader}, None)
+            detector.setup(model, {'train': id_loader_train, 'val': id_loader_val}, None)
+            # 1. Load the COSTARR Validation Sets
+            # Note: Ensure these keys exist in your datasets.py
+            id_val_loader = get_loader('ImageNetV2-Val', batch_size=64)
+            surrogate_loader = get_loader('OpenImage-O-Surrogate', batch_size=64)
 
-            # B. Run Inference on ID (for Thresholds)
-            id_results = run_inference(model, detector, id_loader, device, desc="ID Calibration")
-            id_confs = [r['confidence'] for r in id_results]
-            threshold = compute_id_threshold(id_confs, tpr=0.95)
-            print(f" > Threshold (95% TPR): {threshold:.4f}")
+            print(f"[{det_name}] --- OOSA Calibration---")
 
-            # Save ID rows
-            for row in id_results:
-                row.update({'backbone': bb_name, 'detector': det_name, 'threshold_used': threshold})
-                row['outcome'] = get_outcome(bool(row['correct_cls']), row['confidence'], threshold)
-                all_rows.append(row)
+            # 2. Get Scores for Knowns (ImageNetV2)
+            print(f" > Inference on Knowns (ImageNetV2)...")
+            id_results = run_inference(model, detector, id_val_loader, device)
+
+            id_confs = np.array([r['confidence'] for r in id_results])
+            id_correct_mask = np.array([bool(r['correct_cls']) for r in id_results])
+
+            # 3. Get Scores for Unknowns (OpenImage-O)
+            print(f" > Inference on Unknowns (OpenImage-O)...")
+            surr_results = run_inference(model, detector, surrogate_loader, device)
+            surr_confs = np.array([r['confidence'] for r in surr_results])
+
+            # 4. Compute Threshold
+            from bench.metrics import compute_oosa_threshold
+
+            print(f" > Optimizing Threshold...")
+            oosa_threshold, val_score = compute_oosa_threshold(id_confs, surr_confs, id_correct_mask)
+
+            print(f" > OOSA Threshold: {oosa_threshold:.4f} (Val Score: {val_score:.4f})")
 
             # C. Benchmark Test Datasets
+            # Now we use that threshold on your target Nuisance datasets
             for loader in test_loaders:
                 results = run_inference(model, detector, loader, device, desc=loader.dataset.name)
                 for row in results:
-                    row.update({'backbone': bb_name, 'detector': det_name, 'threshold_used': threshold})
-                    row['outcome'] = get_outcome(bool(row['correct_cls']), row['confidence'], threshold)
+                    row.update({'backbone': bb_name, 'detector': det_name, 'threshold_used': oosa_threshold})
+                    row['outcome'] = get_outcome(bool(row['correct_cls']), row['confidence'], oosa_threshold)
                     all_rows.append(row)
 
     # 4. Save
