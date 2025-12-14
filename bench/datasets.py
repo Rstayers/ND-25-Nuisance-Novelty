@@ -48,7 +48,6 @@ def parse_ln_manifest(line, root):
             'path': parts[0],
             'label': int(parts[1]),
             'level': int(parts[2]),
-            'parce': float(parts[3]),
             'nuisance': parts[4]
         }
 
@@ -73,7 +72,6 @@ def parse_ln_manifest(line, root):
         'path': path,
         'label': label,
         'level': level,
-        'parce': -1.0,
         'nuisance': nuisance
     }
 
@@ -102,7 +100,6 @@ def parse_imagenet_c(line, root):
         'path': path,
         'label': label,
         'level': level,
-        'parce': -1.0,
         'nuisance': nuisance
     }
 
@@ -142,7 +139,6 @@ def parse_cns_benchmark(line, root):
         'path': path,
         'label': label,
         'level': level,
-        'parce': -1.0,
         'nuisance': nuisance
     }
 
@@ -157,7 +153,6 @@ def parse_standard_ood(line, root):
         'path': path,
         'label': label,
         'level': 0,
-        'parce': -1.0,
         'nuisance': 'clean_ood'  # Will be overwritten by dataset name
     }
 # =========================================================
@@ -173,6 +168,11 @@ DATASET_ZOO = {
     "LN_v2": {
         "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v2",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v2.txt",
+        "parser": parse_ln_manifest
+    },
+    "LN_v3": {
+        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v3",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v3.txt",
         "parser": parse_ln_manifest
     },
     "LN_v1": {

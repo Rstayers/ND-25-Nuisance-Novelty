@@ -105,7 +105,10 @@ def get_detector(name):
     # Note: Explicitly checks config.dataset.name
     elif name == 'gradnorm':
         cfg = build_cfg({}, {})
-        return GradNormPostprocessor(Config(cfg))
+        pp =  GradNormPostprocessor(Config(cfg))
+        pp.requires_grad = True
+        return pp
+
 
     # 9. EBO (Energy-based Out-of-distribution detection)
     elif name == 'ebo':

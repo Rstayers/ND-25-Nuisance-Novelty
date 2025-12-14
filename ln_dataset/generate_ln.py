@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models, transforms
+from torchvision.utils import save_image
 from torch.utils.data import DataLoader, Dataset
 import os
 import argparse
@@ -11,24 +12,24 @@ from PIL import Image
 
 # Core Logic
 from ln_dataset.core.autoencoder import ClassifierAwareAE, get_reconstruction_error
-from ln_dataset.core.masks import generate_competency_mask
+from ln_dataset.core.masks import generate_ensemble_saliency_mask
 
 # Nuisance Modules
 from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
 from ln_dataset.nuisances.noise import LocalNoiseNuisance
 from ln_dataset.nuisances.pixel import LocalPixelationNuisance
 from ln_dataset.nuisances.spatial import LocalSpatialNuisance
-from ln_dataset.nuisances.blur import LocalBlurNuisance
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (OLD BIN LOGIC) ---
 TARGET_LEVELS = {
     '1': 0.95,  # Near perfect
     '2': 0.80,  # Good but uncertain
     '3': 0.60,  # Ambiguous
     '4': 0.40,  # Poor
-    '5': 0.15  # Very Low Competency
+    '5': 0.25  # Very Low Competency
 }
-TOLERANCE = 0.08
+TOLERANCE = 0.12
+DEBUG_MAX_IMAGES = 20
 
 
 class ImgListDataset(Dataset):
@@ -61,140 +62,144 @@ class ImgListDataset(Dataset):
         return img, label, path
 
 
-class EnsembleCompetencyJudge(nn.Module):
+class EnsembleParceJudge(nn.Module):
     """
-    Evaluates image competency using an Ensemble of ResNet50 and ViT-B/16.
-    Includes internal normalization so it can accept [0, 1] inputs.
+    Evaluates competency using the PaRCE method (MSP * P_ID) on an ENSEMBLE.
+    Keeps accuracy high (Robustness check) while degrading PaRCE.
     """
 
-    def __init__(self, device):
+    def __init__(self, device, ae_model):
         super().__init__()
         self.device = device
+        self.ae_model = ae_model
 
-        # Internal Normalization for ImageNet Models
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
         )
 
         print("Loading Ensemble (ResNet50 + ViT-B/16)...")
-        self.resnet = models.resnet50(weights='IMAGENET1K_V1').eval().to(device)
-        self.vit = models.vit_b_16(weights='IMAGENET1K_V1').eval().to(device)
+        self.resnet = models.resnet50(weights='IMAGENET1K_V1').to(device).eval()
+        self.vit = models.vit_b_16(weights='IMAGENET1K_V1').to(device).eval()
 
-        self.energy_bias = -5.0
+        # Calibration for P_ID (Adjusted to be stricter)
+        self.error_mu = 0.02
+        self.error_sigma = 0.02
 
-    def get_competency(self, img):
+    @torch.no_grad()
+    def evaluate_step(self, img, label):
         """
-        Args:
-            img: Tensor [B, 3, H, W] in range [0, 1]
+        Returns:
+            is_robust (bool): True ONLY if BOTH models are correct.
+            parce_score (float): Ensemble PaRCE score.
         """
-        # 1. Normalize ON THE FLY (Corrects the mismatch)
         img_norm = self.normalize(img)
 
-        with torch.no_grad():
-            logits_r = self.resnet(img_norm)
-            logits_v = self.vit(img_norm)
+        # 1. Forward Pass Both Models
+        logits_r = self.resnet(img_norm)
+        logits_v = self.vit(img_norm)
 
-            # Ensemble Logits
-            logits_ens = (logits_r + logits_v) / 2.0
-            pred = logits_ens.argmax(dim=1).item()
+        # 2. Check Robustness (Accuracy)
+        pred_r = logits_r.argmax(dim=1).item()
+        pred_v = logits_v.argmax(dim=1).item()
+        is_robust = (pred_r == label) and (pred_v == label)
 
-            # MSP
-            probs = F.softmax(logits_ens, dim=1)
-            msp = probs.max().item()
+        # 3. Calculate Ensemble MSP
+        logits_ens = (logits_r + logits_v) / 2.0
+        probs_ens = F.softmax(logits_ens, dim=1)
+        msp_ens = probs_ens.max().item()
 
-            # Energy Score -> P(ID)
-            energy = torch.logsumexp(logits_ens, dim=1).item()
-            p_id = 1.0 / (1.0 + np.exp(-(energy + self.energy_bias)))
+        # 4. Calculate P_ID (Familiarity via AE Reconstruction)
+        error_map = get_reconstruction_error(self.ae_model, img)
+        mean_error = error_map.mean().item()
+        p_id = np.exp(- (mean_error) / self.error_mu)
+        p_id = np.clip(p_id, 0.0, 1.0)
 
-            parce = msp * p_id
+        # 5. Final PaRCE Score
+        parce_score = msp_ens * p_id
 
-            stats = {
-                'msp': msp,
-                'p_id': p_id,
-                'energy': energy
-            }
-            return parce, pred, stats
+        return is_robust, parce_score
 
 
 def save_tensor_as_img(tensor, path):
-    # Input is already [0, 1], so NO denormalization needed.
     img = torch.clamp(tensor, 0, 1)
     img = img.squeeze(0).permute(1, 2, 0).cpu().numpy()
     img = (img * 255).astype(np.uint8)
     Image.fromarray(img).save(path)
 
 
-def sweep_and_select(judge, ae_model, img, label, output_dir, base_name):
-    # 1. Generate Competency Mask (AE handles [0,1] internally)
-    mask = generate_competency_mask(ae_model, img, percentile=0.40)
+def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, do_debug=False):
+    # 1. Generate New PaRCE Mask (Reconstruction Only)
+    # Using percentile=0.60 to cover more familiar areas for better degradation
+    mask = generate_ensemble_saliency_mask(judge.resnet, judge.vit, img, label)
 
-    # 2. Define Nuisances
-    n_blur = LocalBlurNuisance(severity=1)
-    n_blur.name = "blur"
+    # Visualize Debug
+    if do_debug:
+        debug_dir = os.path.join(output_dir, "debug_viz")
+        os.makedirs(debug_dir, exist_ok=True)
 
-    n_noise = LocalNoiseNuisance(severity=1)
-    n_noise.name = "noise"
+        # Red Overlay for Mask
+        overlay_alpha = 0.6
+        solid_red = torch.zeros_like(img);
+        solid_red[:, 0, :, :] = 1.0
+        mask_viz = img * (1 - overlay_alpha * mask) + solid_red * (overlay_alpha * mask)
 
-    n_pixel = LocalPixelationNuisance(severity=1)
-    n_pixel.name = "pixel"
+        save_image(mask_viz, os.path.join(debug_dir, f"{base_name}_saliency_mask.jpg"))
 
-    n_spatial = LocalSpatialNuisance(severity=1)
-    n_spatial.name = "spatial"
-
-    n_bright = LocalPhotometricNuisance(mode='brightness', severity=1)
-    n_bright.name = "brightness"
-
-    n_contrast = LocalPhotometricNuisance(mode='contrast', severity=1)
-    n_contrast.name = "contrast"
-
-    n_sat = LocalPhotometricNuisance(mode='saturation', severity=1)
-    n_sat.name = "saturation"
-
-    nuisances = [n_blur, n_noise, n_pixel, n_spatial, n_bright, n_contrast, n_sat]
+    nuisances = [
+        LocalNoiseNuisance(severity=1),
+        LocalPixelationNuisance(severity=1),
+        LocalSpatialNuisance(severity=1),
+        LocalPhotometricNuisance(mode='brightness', severity=1),
+        LocalPhotometricNuisance(mode='contrast', severity=1),
+        LocalPhotometricNuisance(mode='saturation', severity=1)
+    ]
+    names = ["noise", "pixel", "spatial", "brightness", "contrast", "saturation"]
+    for n, name in zip(nuisances, names): n.name = name
 
     selected_samples = []
 
     for nuisance in nuisances:
         buckets_needed = set(TARGET_LEVELS.keys())
 
-        # Sweep param
+        # Sweep parameter p from 0.05 to 1.0
         for p in np.linspace(0.05, 1.0, 40):
             if not buckets_needed: break
 
-            # Apply Nuisance (Now operating on clean [0,1] data)
             img_perturbed = nuisance.apply(img, mask, manual_param=p)
 
-            # Evaluate (Judge handles normalization)
-            parce, pred, stats = judge.get_competency(img_perturbed)
+            # Evaluate with updated PaRCE Judge
+            is_robust, parce = judge.evaluate_step(img_perturbed, label)
 
-            if pred == label:
+            # --- OLD BIN LOGIC with NEW ROBUSTNESS CHECK ---
+            # We require the image to be Robust (Top-1 Correct) to be included.
+            if is_robust:
                 for level, target in TARGET_LEVELS.items():
                     if level in buckets_needed:
                         if abs(parce - target) < TOLERANCE:
-                            # --- FOLDER STRUCTURE ---
+                            # Save Logic
                             nuisance_dir = os.path.join(output_dir, nuisance.name)
                             level_dir = os.path.join(nuisance_dir, str(level))
                             os.makedirs(level_dir, exist_ok=True)
 
                             fname = f"{base_name}.png"
                             save_path = os.path.join(level_dir, fname)
-
                             save_tensor_as_img(img_perturbed, save_path)
 
                             rel_path = os.path.join(nuisance.name, str(level), fname).replace("\\", "/")
-
                             selected_samples.append({
                                 'path': rel_path,
                                 'level': level,
                                 'parce': parce,
-                                'p': p,
-                                'nuisance': nuisance.name,
-                                'stats': stats
+                                'nuisance': nuisance.name
                             })
 
                             buckets_needed.remove(level)
                             break
+            else:
+                # If robustness fails, we stop this nuisance sweep immediately
+                # (since increasing p will likely only make it worse)
+                break
 
     return selected_samples
 
@@ -209,22 +214,22 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    judge = EnsembleCompetencyJudge(device)
-
-    # AE
     ae = ClassifierAwareAE().to(device)
     ae.load_state_dict(torch.load(args.ae_weights, map_location=device))
     ae.eval()
 
-    # Data - REMOVED NORMALIZATION
+    # New PaRCE Judge
+    judge = EnsembleParceJudge(device, ae_model=ae)
+
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.ToTensor(),  # Returns [0, 1]
+        transforms.ToTensor(),
     ])
     dataset = ImgListDataset(args.data, args.imglist, transform=transform)
 
     os.makedirs(args.out_dir, exist_ok=True)
     manifest_lines = []
+    debug_counter = 0
 
     print(f"Starting Generation on {len(dataset)} images...")
 
@@ -235,10 +240,13 @@ def main():
         img = img.unsqueeze(0).to(device)
         base_name = os.path.splitext(os.path.basename(path))[0]
 
-        parce, pred, _ = judge.get_competency(img)
+        is_robust, parce = judge.evaluate_step(img, label)
 
-        if pred == label and parce > 0.90:
-            results = sweep_and_select(judge, ae, img, label, args.out_dir, base_name)
+        # Start with High Competency images
+        if parce > 0.85 and is_robust:
+            do_debug = (debug_counter < DEBUG_MAX_IMAGES)
+            results = sweep_and_select(judge, ae, img, label, args.out_dir, base_name, do_debug=do_debug)
+            if do_debug: debug_counter += 1
 
             for res in results:
                 line = f"{res['path']} {label}"
@@ -246,7 +254,6 @@ def main():
 
     with open(os.path.join(args.out_dir, "imagenet_ln_v2.txt"), "w") as f:
         f.write("\n".join(manifest_lines))
-
     print(f"Generation Complete. Output at {args.out_dir}")
 
 

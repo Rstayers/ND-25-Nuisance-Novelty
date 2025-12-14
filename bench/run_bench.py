@@ -28,42 +28,53 @@ def get_outcome(is_correct, confidence, threshold):
     return "Error"
 
 
-# --- Inference ---
+# bench/run_bench.py
+
 def run_inference(model, postprocessor, loader, device, desc=""):
-    """
-    Runs inference. Does NOT call setup() anymore.
-    """
     results = []
+    needs_grad = getattr(postprocessor, "requires_grad", False)
 
     print(f"Running Inference: {desc}")
-    with torch.no_grad():
+    grad_ctx = torch.enable_grad() if needs_grad else torch.no_grad()
+
+    with grad_ctx:
         for batch in tqdm(loader, desc=desc):
-            if batch is None: continue
+            if batch is None:
+                continue
 
-            # FIX: Use 'data' key
-            img = batch['data'].to(device)
-            labels = batch['label'].to(device)
+            img = batch["data"].to(device)
+            labels = batch["label"].to(device)
 
-            # OpenOOD Call
-            preds, confs = postprocessor.postprocess(model, img)
+            # --- RAW CLASSIFIER (ground-truth top-1 accuracy should come from here)
+            logits = model(img)
+            raw_preds = logits.argmax(dim=1)
 
-            preds = preds.cpu().numpy()
-            confs = confs.cpu().numpy()
-            labels = labels.cpu().numpy()
+            # --- DETECTOR SCORE (may also return its own preds; do NOT use for raw accuracy)
+            det_preds, det_confs = postprocessor.postprocess(model, img)
 
-            bs = len(preds)
+            raw_preds_np = raw_preds.detach().cpu().numpy()
+            det_preds_np = det_preds.detach().cpu().numpy()
+            det_confs_np = det_confs.detach().cpu().numpy()
+            labels_np = labels.detach().cpu().numpy()
+
+            bs = len(labels_np)
             for i in range(bs):
                 results.append({
-                    'dataset': batch['dataset_name'][i],
-                    'path': batch['path'][i],
-                    'label': labels[i],
-                    'prediction': preds[i],
-                    'confidence': confs[i],
-                    'correct_cls': int(preds[i] == labels[i]),
-                    'level': batch['level'][i].item(),
-                    'nuisance': batch['nuisance'][i],
-                    'competency_parce': batch['parce'][i].item()
+                    "dataset": batch["dataset_name"][i],
+                    "path": batch["path"][i],
+                    "label": int(labels_np[i]),
+
+                    # raw classifier quantities
+                    "raw_prediction": int(raw_preds_np[i]),
+                    "correct_cls": int(raw_preds_np[i] == labels_np[i]),  # <--- FIXED
+
+                    # detector quantities
+                    "prediction": int(det_preds_np[i]),          # keep if you want to inspect
+                    "confidence": float(det_confs_np[i]),        # detector score (direction varies!)
+                    "level": int(batch["level"][i].item()),
+                    "nuisance": batch["nuisance"][i],
                 })
+
     return results
 
 
@@ -71,9 +82,9 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--backbones', nargs='+', default=['vit_b_16', 'resnet50'])
-    parser.add_argument('--detectors', nargs='+', default=[ 'gradnorm', 'ebo','msp', 'react', 'ash'])
+    parser.add_argument('--detectors', nargs='+', default=['ebo', 'msp', 'react', 'ash'])
     parser.add_argument('--id_dataset', default="ImageNet-Test")
-    parser.add_argument('--test_datasets', nargs='+', default=['LN_v1', 'ImageNet-C', 'LN_v2'])
+    parser.add_argument('--test_datasets', nargs='+', default=['LN_v3', 'ImageNet-C', 'LN_v2'])
     parser.add_argument('--out_dir', default="analysis/bench_results")
     args = parser.parse_args()
 
@@ -144,7 +155,7 @@ def main():
     # 4. Save
     df = pd.DataFrame(all_rows)
     cols = ['backbone', 'detector', 'dataset', 'nuisance', 'level', 'outcome',
-            'correct_cls', 'confidence', 'competency_parce', 'prediction', 'label', 'path']
+            'correct_cls', 'confidence', 'prediction', 'label', 'path']
     df = df[[c for c in cols if c in df.columns]]
 
     csv_path = os.path.join(args.out_dir, "final_benchmark.csv")

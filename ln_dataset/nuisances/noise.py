@@ -13,7 +13,7 @@ class LocalNoiseNuisance:
         """
         if manual_param is not None:
             # Map 0-1 to reasonable noise range 0.0 - 0.3
-            eps = manual_param * 0.3
+            eps = manual_param * 0.6
         else:
             idx = max(0, min(self.severity - 1, 4))
             eps = self.epsilons[idx]

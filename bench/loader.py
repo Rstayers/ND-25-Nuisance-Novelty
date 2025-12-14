@@ -77,7 +77,6 @@ class ConfigurableDataset(Dataset):
             'label': item['label'],
             'path': item['path'],
             'level': item['level'],
-            'parce': item['parce'],
             'nuisance': item['nuisance'],
             'dataset_name': self.name
         }
