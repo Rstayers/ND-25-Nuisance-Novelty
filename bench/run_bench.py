@@ -40,14 +40,19 @@ def run_inference(model, postprocessor, loader, device, desc=""):
         for batch in tqdm(loader, desc=desc):
             if batch is None: continue
 
-            # FIX: Use 'data' key
             img = batch['data'].to(device)
             labels = batch['label'].to(device)
 
-            # OpenOOD Call
-            preds, confs = postprocessor.postprocess(model, img)
+            # 1. Get Vanilla Predictions (Consistent k1 accuracy)
+            logits = model(img)
+            # Use raw logits for prediction to keep accuracy constant across detectors
+            clean_preds = logits.argmax(dim=1)
 
-            preds = preds.cpu().numpy()
+            # 2. Get OOD Scores (Detector specific)
+            # Some detectors return preds, but we ignore them for consistency checks
+            _, confs = postprocessor.postprocess(model, img)
+
+            preds = clean_preds.cpu().numpy()  # USE CLEAN PREDS
             confs = confs.cpu().numpy()
             labels = labels.cpu().numpy()
 
@@ -70,10 +75,10 @@ def run_inference(model, postprocessor, loader, device, desc=""):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--backbones', nargs='+', default=['vit_b_16', 'resnet50'])
-    parser.add_argument('--detectors', nargs='+', default=[ 'gradnorm', 'ebo','msp', 'react', 'ash'])
+    parser.add_argument('--backbones', nargs='+', default=['vit_b_16', 'resnet50', 'densenet121', 'swin_t', 'convnext_t'])
+    parser.add_argument('--detectors', nargs='+', default=['ebo','msp', 'react'])
     parser.add_argument('--id_dataset', default="ImageNet-Test")
-    parser.add_argument('--test_datasets', nargs='+', default=['LN_v1', 'ImageNet-C', 'LN_v2'])
+    parser.add_argument('--test_datasets', nargs='+', default=['LN_v3'])
     parser.add_argument('--out_dir', default="analysis/bench_results")
     args = parser.parse_args()
 

@@ -175,6 +175,11 @@ DATASET_ZOO = {
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v2.txt",
         "parser": parse_ln_manifest
     },
+    "LN_v3": {
+        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v3",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v3.txt",
+        "parser": parse_ln_manifest
+    },
     "LN_v1": {
         "root": f"{DATA_ROOT_DEFAULT}",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln.txt",

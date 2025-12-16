@@ -1,246 +1,178 @@
+import json
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as dist
 from torchvision import models, transforms
-from torchvision.utils import save_image
-from torch.utils.data import DataLoader, Dataset
 import os
 import argparse
 import numpy as np
 from tqdm import tqdm
-from PIL import Image
 
 # Core Logic
-from ln_dataset.core.autoencoder import ClassifierAwareAE, get_reconstruction_error
-from ln_dataset.core.masks import generate_competency_mask
+from ln_dataset.core.autoencoder import ClassifierAwareAE
+from ln_dataset.core.masks import generate_competency_mask_hybrid
 
 # Nuisance Modules
 from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
 from ln_dataset.nuisances.noise import LocalNoiseNuisance
 from ln_dataset.nuisances.pixel import LocalPixelationNuisance
 from ln_dataset.nuisances.spatial import LocalSpatialNuisance
+from ln_dataset.train_ae import ImgListDataset
+from ln_dataset.utils import NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-TARGET_LEVELS = {
-    '1': 0.95,  # Canonical ( < 0.3 sigma )
-    '2': 0.80,  # Good ( ~0.6 sigma )
-    '3': 0.55,  # Ambiguous ( ~1.2 sigma )
-    '4': 0.25,  # Poor ( ~1.7 sigma )
-    '5': 0.05   # OOD ( > 2.5 sigma )
+
+BIN_EDGES = {
+    '1': 0.863,  # > 0.863 = Level 1
+    '2': 0.722,  # > 0.722 = Level 2
+    '3': 0.582,  # > 0.582 = Level 3
+    '4': 0.440,  # > 0.440 = Level 4
+    '5': 0.000   # < 0.440 = Level 5
 }
-
-# Increased tolerance because the Gaussian curve is steep!
-# It's hard to hit exactly 0.55, so 0.55 +/- 0.08 covers [0.47 - 0.63]
-TOLERANCE = 0.08
-STATS_FILE = "ln_dataset/assets/parce_stats.pt"
-MIN_SIGMA_RATIO = 0.10  # Sigma must be at least 10% of Mean to prevent score collapse
+TOLERANCE = 0.10
+DEBUG_MAX_IMAGES = 10
 
 
 # ==========================================
-# 2. ACTUAL PARCE JUDGE (Robust Implementation)
+# 2. CONFIDENCE (MSP) JUDGE
 # ==========================================
-class ActualParceJudge:
-    def __init__(self, device, ae_model, stats_path=STATS_FILE):
+class ConfidenceJudge:
+    def __init__(self, device):
         self.device = device
-        self.ae = ae_model
 
+        # 1. Load Classifiers
         print("Loading classifiers...")
         self.resnet = models.resnet50(weights='IMAGENET1K_V1').to(device).eval()
         self.vit = models.vit_b_16(weights='IMAGENET1K_V1').to(device).eval()
 
-        if os.path.exists(stats_path):
-            self.stats = torch.load(stats_path, map_location=device)
-            print(f"Loaded PaRCE stats for {len(self.stats)} classes.")
-        else:
-            print(f"WARNING: No stats found at {stats_path}! Run with --calibrate first.")
-            self.stats = {}
+        # Normalizer for classifiers
+        self.normalize = transforms.Normalize(mean=NORM_MEAN, std=NORM_STD)
 
     def get_competency(self, img_tensor, target_label=None):
         """
-        Calculates PaRCE Score using Robust Half-Gaussian P(ID).
+        MSP Estimation:
+        Score = Max( P_ensemble(c|x) )
         """
         with torch.no_grad():
-            # 1. Individual Forward Passes
-            logits_r = self.resnet(img_tensor)
-            logits_v = self.vit(img_tensor)
+            # A. CLASSIFIER PROBABILITIES (Requires Normalization)
+            img_norm = self.normalize(img_tensor)
 
+            logits_r = self.resnet(img_norm)
+            logits_v = self.vit(img_norm)
+
+            # Softmax to get P(c|x)
             probs_r = F.softmax(logits_r, dim=1)
             probs_v = F.softmax(logits_v, dim=1)
 
-            # 2. Check Agreement
-            pred_r = probs_r.argmax(dim=1).item()
-            pred_v = probs_v.argmax(dim=1).item()
-            disagreement = (pred_r != pred_v)
+            # Ensemble Mixture
+            probs_ens = (probs_r + probs_v) / 2.0  # Shape: [1, 1000]
 
-            # 3. Ensemble Probability
-            avg_probs = (probs_r + probs_v) / 2.0
+            # B. PREDICTIONS & LOGIC (Preserved)
+            # Get the confidence and the predicted class
+            confidence, pred_tensor = torch.max(probs_ens, dim=1)
+            pred_idx = pred_tensor.item()
+            score = confidence.item()
 
+            # Disagreement check
+            disagreement = (probs_r.argmax(dim=1).item() != probs_v.argmax(dim=1).item())
+
+            # Debug info
             if target_label is not None:
-                p_class_val = avg_probs[0, target_label].item()
-                label_to_use = target_label
-                pred_label = avg_probs.argmax(dim=1).item()
+                tgt = target_label
+                tgt_prob = probs_ens[0, tgt].item()
+                debug_str = f"Conf:{score:.4f} TgtProb:{tgt_prob:.4f} Disagree:{disagreement}"
             else:
-                p_class_val, pred_idx = torch.max(avg_probs, dim=1)
-                p_class_val = p_class_val.item()
-                label_to_use = pred_idx.item()
-                pred_label = label_to_use
+                debug_str = "N/A"
 
-            # 4. Reconstruction Probability
-            recon = self.ae(img_tensor)
-            recon_err = torch.mean((img_tensor - recon) ** 2).item()
-
-            p_id, debug_str = self._calculate_p_id(label_to_use, recon_err)
-
-            # Final Score
-            parce_score = p_class_val * p_id
-
-            return parce_score, pred_label, disagreement, debug_str
-
-    def _calculate_p_id(self, label, error):
-        """
-        Calculates Relative Likelihood of ID.
-        Uses One-Sided Gaussian:
-        - If error <= mean, we assume it's "Perfectly ID" (Score 1.0)
-        - If error > mean, we decay based on Z-score.
-        """
-        if label not in self.stats:
-            return 0.5, "NoStats"
-
-        mu = self.stats[label]['mean']
-        sigma = self.stats[label]['std']
-
-        # --- ROBUSTNESS FIX ---
-        # If sigma is too small, Z-scores explode and P(ID) -> 0 for everything.
-        # We clamp sigma to be at least X% of the mean.
-        eff_sigma = max(sigma, mu * MIN_SIGMA_RATIO)
-
-        if error <= mu:
-            p_val = 1.0
-        else:
-            z = (error - mu) / (eff_sigma + 1e-9)
-            p_val = np.exp(-0.5 * (z ** 2))
-
-        debug_str = f"Err:{error:.5f} Mu:{mu:.5f} Sig:{eff_sigma:.5f} Z:{z if error > mu else 0:.1f} P_ID:{p_val:.3f}"
-        return float(p_val), debug_str
+            return score, pred_idx, disagreement, debug_str
 
 
-# ==========================================
-# 3. CALIBRATION & SWEEP
-# ==========================================
-def calibrate_parce(ae_model, dataset, device, batch_size=32):
-    print("Starting PaRCE Calibration...")
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-    raw_errors = {}
-    ae_model.eval()
+def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_dir=None):
+    # 1. Generate Mask
+    mask = generate_competency_mask_hybrid(ae_model, img, models=[judge.resnet, judge.vit], area=0.15,
+                                           avoid_top_saliency=0.05, contiguous=True)
 
-    with torch.no_grad():
-        for imgs, labels, _ in tqdm(loader):
-            imgs = imgs.to(device)
-            recon = ae_model(imgs)
-            mse = ((imgs - recon) ** 2).mean(dim=(1, 2, 3))
+    if debug_dir is not None:
+        save_debug_maps(judge, ae_model, img, label, mask, debug_dir)
 
-            for i in range(len(labels)):
-                lbl = int(labels[i])
-                err = mse[i].item()
-                if lbl not in raw_errors: raw_errors[lbl] = []
-                raw_errors[lbl].append(err)
-
-    stats = {}
-    print("Aggregating Statistics...")
-    for lbl, errors in raw_errors.items():
-        arr = np.array(errors)
-        # Compute Stats
-        mu = float(np.mean(arr))
-        std = float(np.std(arr))
-        stats[lbl] = {'mean': mu, 'std': std}
-
-    os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
-    torch.save(stats, STATS_FILE)
-    print(f"Calibration Saved: {STATS_FILE}")
-    print(f"Example (Class {list(stats.keys())[0]}): Mu={stats[list(stats.keys())[0]]['mean']:.5f}")
-
-
-class ImgListDataset(Dataset):
-    def __init__(self, root, imglist_path, transform=None):
-        self.root = root
-        self.transform = transform
-        self.samples = []
-        if not os.path.exists(imglist_path): raise FileNotFoundError(f"{imglist_path} not found")
-        with open(imglist_path, 'r') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2: self.samples.append((parts[0], int(parts[1])))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        full_path = os.path.join(self.root, path)
-        try:
-            img = Image.open(full_path).convert('RGB')
-        except:
-            return None, None, None
-        if self.transform: img = self.transform(img)
-        return img, label, path
-
-
-def save_tensor_as_img(tensor, path):
-    img = torch.clamp(tensor, 0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy()
-    img = (img * 255).astype(np.uint8)
-    Image.fromarray(img).save(path)
-
-
-def sweep_and_select(judge, ae_model, img, label, output_dir, base_name):
-    mask = generate_competency_mask(ae_model, img, percentile=0.40)
-
+    # 2. Define Nuisances (Standard + Bidirectional Photometric)
+    # We include tuples of (NuisanceObject, FolderName)
     nuisances = [
-        LocalNoiseNuisance(severity=1),
-        LocalPixelationNuisance(severity=1),
-        LocalSpatialNuisance(severity=1),
-        LocalPhotometricNuisance(mode='brightness', severity=1),
-        LocalPhotometricNuisance(mode='contrast', severity=1),
-        LocalPhotometricNuisance(mode='saturation', severity=1),
-
+        (LocalNoiseNuisance(severity=1), 'noise'),
+        (LocalPixelationNuisance(severity=1), 'pixelation'),
+       (LocalSpatialNuisance(severity=1), 'spatial'),
+        (LocalPhotometricNuisance(mode='brightness', severity=1), 'brightness'),
+        (LocalPhotometricNuisance(mode='contrast', severity=1), 'contrast'),
+        (LocalPhotometricNuisance(mode='saturation', severity=1), 'saturation'),
     ]
-    n_names = [ "noise", "pixel", "spatial", "brightness", "contrast", "saturation"]
 
     selected_samples = []
 
-    for i, nuisance in enumerate(nuisances):
-        buckets_needed = set(TARGET_LEVELS.keys())
+    for nuisance_obj, n_name in nuisances:
 
-        # Sweep
-        for p in np.linspace(0.05, 1.0, 40):
-            if not buckets_needed: break
+        # Dictionary to store the BEST (hardest) candidate for each level found so far
+        # Key: Level ('1', '2'...), Value: dict with image, p, score
+        best_candidates = {}
 
-            img_perturbed = nuisance.apply(img, mask, manual_param=p)
+        # Sweep severity p (Forward: 0.05 -> 1.0)
+        # We MUST go forward to detect where the model breaks
+        for p in np.linspace(0.05, 1.0, 50):
 
-            # PERMISSIVE CHECK for sweep
-            parce, pred, disagree, _ = judge.get_competency(img_perturbed, target_label=label)
+            # A. Apply Nuisance
+            img_perturbed = nuisance_obj.apply(img, mask, manual_param=p)
 
-            for level, target in TARGET_LEVELS.items():
-                if level in buckets_needed:
-                    if abs(parce - target) < TOLERANCE and (pred == label) and not disagree:
-                        # Save
-                        n_name = n_names[i]
-                        level_dir = os.path.join(output_dir, n_name, str(level))
-                        os.makedirs(level_dir, exist_ok=True)
+            # B. Measure Competency
+            parce, pred, disagree, _ = judge.get_competency(
+                img_perturbed,
+                target_label=label,
+            )
 
-                        fname = f"{base_name}.png"
-                        save_path = os.path.join(level_dir, fname)
-                        save_tensor_as_img(img_perturbed, save_path)
+            # C. STRICT ENFORCEMENT
+            # If model fails, we cannot go deeper. STOP scanning this nuisance.
+            if disagree or (pred != label):
+                break
 
-                        rel_path = os.path.join(n_name, str(level), fname).replace("\\", "/")
-                        selected_samples.append({'path': rel_path})
+            # D. Identify Bin
+            assigned_lvl = None
+            if parce > BIN_EDGES['1']:
+                assigned_lvl = '1'
+            elif parce > BIN_EDGES['2']:
+                assigned_lvl = '2'
+            elif parce > BIN_EDGES['3']:
+                assigned_lvl = '3'
+            elif parce > BIN_EDGES['4']:
+                assigned_lvl = '4'
+            else:
+                assigned_lvl = '5'
 
-                        buckets_needed.remove(level)
-                        break
+            # E. UPDATE CANDIDATE (The Fix)
+            # Since p is increasing, every new match for a level is "harder" (higher p)
+            # We simply overwrite the previous candidate for this level.
+            if assigned_lvl:
+                best_candidates[assigned_lvl] = {
+                    'img': img_perturbed,  # Keep tensor on GPU until save
+                    'p': p,
+                    'score': parce,
+                    'level': assigned_lvl
+                }
+
+        # F. SAVE RESULTS
+        # Now that the loop is done (or broken), we save the hardest candidates we found.
+        for lvl, data in best_candidates.items():
+            level_dir = os.path.join(output_dir, n_name, lvl)
+            os.makedirs(level_dir, exist_ok=True)
+
+            fname = f"{base_name}.png"
+            save_path = os.path.join(level_dir, fname)
+
+            save_tensor_as_img(data['img'], save_path)
+
+            rel_path = os.path.join(n_name, lvl, fname).replace("\\", "/")
+            selected_samples.append({'path': rel_path})
+
     return selected_samples
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -248,7 +180,8 @@ def main():
     parser.add_argument('--imglist', type=str, required=True)
     parser.add_argument('--ae_weights', type=str, required=True)
     parser.add_argument('--out_dir', type=str, default="./ln_output_v3")
-    parser.add_argument('--calibrate', default=False, action='store_true')
+    parser.add_argument('--debug_maps', action='store_true')
+    parser.add_argument('--debug_max', type=int, default=DEBUG_MAX_IMAGES)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -263,49 +196,41 @@ def main():
     ])
     dataset = ImgListDataset(args.data, args.imglist, transform=transform)
 
-    if args.calibrate:
-        calibrate_parce(ae, dataset, device)
-        exit(0)
-    else:
-        judge = ActualParceJudge(device, ae_model=ae)
-        os.makedirs(args.out_dir, exist_ok=True)
-        manifest_lines = []
+    judge = ConfidenceJudge(device)
+    os.makedirs(args.out_dir, exist_ok=True)
+    manifest_lines = []
 
-        print(f"Starting Generation (Strict Base -> Permissive Sweep)...")
-
-        # Debug Counters
-
-        for i in tqdm(range(len(dataset))):
-            img, label, path = dataset[i]
-            if img is None: continue
-
-            img = img.unsqueeze(0).to(device)
-            base_name = os.path.splitext(os.path.basename(path))[0]
-
-            # 1. EVALUATE BASE IMAGE
-            parce, pred, disagree, debug_info = judge.get_competency(img, target_label=label)
-
-            # === DEBUG PRINT for first 10 images ===
+    print(f"Starting Generation (Full PaRCE)...")
 
 
+    for i in tqdm(range(len(dataset))):
+        img, label, path = dataset[i]
+        if img is None: continue
 
+        img = img.unsqueeze(0).to(device)
+        base_name = os.path.splitext(os.path.basename(path))[0]
 
-            if (pred != label) or disagree:
-                continue
-            # Accepted Base Image
-            results = sweep_and_select(judge, ae, img, label, args.out_dir, base_name)
-            for res in results:
-                manifest_lines.append(f"{res['path']} {label}")
+        parce, pred, disagree, debug_info = judge.get_competency(img, target_label=label)
 
-        with open(os.path.join(args.out_dir, "manifest.txt"), "w") as f:
-            f.write("\n".join(manifest_lines))
+        if i < DEBUG_MAX_IMAGES:
+            print(f"\n[DEBUG Img {i}] L:{label} P:{pred} Dis:{disagree} PaRCE:{parce:.3f} | {debug_info}")
 
-        print("\nGeneration Complete.")
-        print(f"Total Processed: {stats['total']}")
-        print(f"Skipped (Wrong Pred): {stats['skipped_wrong']}")
-        print(f"Skipped (Disagree): {stats['skipped_disagree']}")
-        print(f"Skipped (Low Score <0.9): {stats['skipped_low_score']}")
-        print(f"Accepted Base Images: {stats['accepted']}")
+        if pred != label:
+            continue
+        if disagree:
+            continue
+
+        debug_dir = None
+        if args.debug_maps and i < args.debug_max:
+            debug_dir = os.path.join(args.out_dir, "debug", f"{i:05d}_{base_name}")
+        results = sweep_and_select(judge, ae, img, label, args.out_dir, base_name, debug_dir)
+        for res in results:
+            manifest_lines.append(f"{res['path']} {label}")
+
+    with open(os.path.join(args.out_dir, "manifest.txt"), "w") as f:
+        f.write("\n".join(manifest_lines))
+
+    print("\nGeneration Complete.")
 
 
 if __name__ == "__main__":
