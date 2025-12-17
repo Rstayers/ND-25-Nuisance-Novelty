@@ -7,6 +7,7 @@ import os
 import numpy as np
 import torch
 from PIL import Image
+from regex import F
 from torch.utils.data import Dataset
 
 from ln_dataset.core.autoencoder import get_reconstruction_error
@@ -14,16 +15,35 @@ STATS_FILE = "ln_dataset/assets/parce_stats_full.pt"
 NORM_MEAN = [0.485, 0.456, 0.406]
 NORM_STD = [0.229, 0.224, 0.225]
 
+import os
+import torch
+import numpy as np
+from PIL import Image
+from torch.utils.data import Dataset
+import torchvision.transforms.functional as TF
+import matplotlib.pyplot as plt
+
+# Global Constants
+STATS_FILE = "ln_dataset/assets/parce_stats_full.pt"
+NORM_MEAN = [0.485, 0.456, 0.406]
+NORM_STD = [0.229, 0.224, 0.225]
+
+
 class ImgListDataset(Dataset):
     def __init__(self, root, imglist_path, transform=None):
         self.root = root
         self.transform = transform
         self.samples = []
-        if not os.path.exists(imglist_path): raise FileNotFoundError(f"{imglist_path} not found")
+
+        if not os.path.exists(imglist_path):
+            raise FileNotFoundError(f"{imglist_path} not found")
+
         with open(imglist_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
-                if len(parts) >= 2: self.samples.append((parts[0], int(parts[1])))
+                if len(parts) >= 2:
+                    # parts[0] is relative path, parts[1] is label index
+                    self.samples.append((parts[0], int(parts[1])))
 
     def __len__(self):
         return len(self.samples)
@@ -31,18 +51,53 @@ class ImgListDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         full_path = os.path.join(self.root, path)
+
         try:
-            img = Image.open(full_path).convert('RGB')
-        except:
-            return None, None, None
-        if self.transform: img = self.transform(img)
-        return img, label, path
+            with open(full_path, 'rb') as f:
+                # --- CRITICAL FIX ---
+                # Force Convert to RGB. ImageNet contains grayscale images (mode 'L').
+                # Without this, ToTensor() creates [1, H, W], crashing the [3, H, W] normalization.
+                img = Image.open(f).convert('RGB')
+
+            if self.transform:
+                img = self.transform(img)
+
+            return img, label, path
+
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            return None, label, path
 
 
 def save_tensor_as_img(tensor, path):
-    img = torch.clamp(tensor, 0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy()
-    img = (img * 255).astype(np.uint8)
-    Image.fromarray(img).save(path)
+    """Saves a (C, H, W) tensor to an image file."""
+    tensor = tensor.detach().cpu()
+    if tensor.ndim == 4: tensor = tensor.squeeze(0)
+    img = TF.to_pil_image(tensor)
+    img.save(path)
+
+
+def _save_heatmap(tensor, path, cmap='jet'):
+    """Helper to save a single channel tensor as a heatmap."""
+    tensor = tensor.detach().cpu().squeeze()
+    plt.imsave(path, tensor.numpy(), cmap=cmap, vmin=0, vmax=1)
+
+
+def save_debug_maps(judge, ae, img, label, mask, output_dir):
+    from ln_dataset.core.autoencoder import get_reconstruction_error
+    os.makedirs(output_dir, exist_ok=True)
+    save_tensor_as_img(img, os.path.join(output_dir, "00_orig.png"))
+    err = get_reconstruction_error(ae, img)
+    err = (err - err.min()) / (err.max() - err.min() + 1e-6)
+    _save_heatmap(err, os.path.join(output_dir, "01_familiarity.png"), cmap='magma')
+    _save_heatmap(mask, os.path.join(output_dir, "03_final_mask.png"), cmap='gray')
+    img_np = img.permute(0, 2, 3, 1).cpu().squeeze().numpy()
+    mask_np = mask.cpu().squeeze().numpy()
+    overlay = img_np.copy()
+    overlay[mask_np > 0.1, 1] = np.clip(overlay[mask_np > 0.1, 1] + 0.3, 0, 1)
+    plt.imsave(os.path.join(output_dir, "04_overlay.png"), overlay)
+
+
 # ==========================================
 #  MASK DEBUG
 # ==========================================
@@ -104,45 +159,4 @@ def compute_input_saliency_msp(judge, img_tensor, target_label=None):
     sal = x.grad.detach().abs().mean(dim=1, keepdim=True)
     return sal
 
-def save_debug_maps(judge, ae_model, img, label, mask, debug_dir):
-    os.makedirs(debug_dir, exist_ok=True)
 
-    pil_img = _to_pil_rgb(img)
-    pil_img.save(os.path.join(debug_dir, "img.png"))
-
-    # Reconstruction error map (your mask code is based on recon error in the simple version :contentReference[oaicite:4]{index=4})
-    err = get_reconstruction_error(ae_model, img)  # (1,1,H,W)
-    fam = 1.0 - _norm01(err)
-
-    sal = compute_input_saliency_msp(judge, img, target_label=label)
-
-    # Save raw/heat/overlay for each
-    _to_pil_gray(err).save(os.path.join(debug_dir, "err_gray.png"))
-    _to_pil_heat(err, "magma").save(os.path.join(debug_dir, "err_heat.png"))
-    _overlay(pil_img, err, 0.5, "magma").save(os.path.join(debug_dir, "err_overlay.png"))
-
-    _to_pil_gray(fam).save(os.path.join(debug_dir, "fam_gray.png"))
-    _to_pil_heat(fam, "viridis").save(os.path.join(debug_dir, "fam_heat.png"))
-    _overlay(pil_img, fam, 0.5, "viridis").save(os.path.join(debug_dir, "fam_overlay.png"))
-
-    _to_pil_gray(sal).save(os.path.join(debug_dir, "sal_gray.png"))
-    _to_pil_heat(sal, "inferno").save(os.path.join(debug_dir, "sal_heat.png"))
-    _overlay(pil_img, sal, 0.5, "inferno").save(os.path.join(debug_dir, "sal_overlay.png"))
-
-    _to_pil_gray(mask).save(os.path.join(debug_dir, "mask_gray.png"))
-    _to_pil_heat(mask, "plasma").save(os.path.join(debug_dir, "mask_heat.png"))
-    _overlay(pil_img, mask, 0.5, "plasma").save(os.path.join(debug_dir, "mask_overlay.png"))
-
-    # Also save a binarized mask snapshot
-    mask_bin = (mask > 0.5).float()
-    _to_pil_gray(mask_bin).save(os.path.join(debug_dir, "mask_bin.png"))
-
-    stats = {
-        "label": int(label),
-        "err_minmax": [float(err.min().item()), float(err.max().item())],
-        "sal_minmax": [float(sal.min().item()), float(sal.max().item())],
-        "mask_mean": float(mask.mean().item()),
-        "mask_bin_area": float(mask_bin.mean().item()),
-    }
-    with open(os.path.join(debug_dir, "stats.json"), "w") as f:
-        json.dump(stats, f, indent=2)
