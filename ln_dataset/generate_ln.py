@@ -91,8 +91,8 @@ class ConfidenceJudge:
 
 def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_dir=None):
     # 1. Generate Mask
-    mask = generate_competency_mask_hybrid(ae_model, img, models=[judge.resnet, judge.vit], area=0.15,
-                                           avoid_top_saliency=0.05, contiguous=True)
+    mask = generate_competency_mask_hybrid(ae_model, img, models=[judge.resnet, judge.vit], area=0.20,
+                                           avoid_top_saliency=0.15, contiguous=True)
 
     if debug_dir is not None:
         save_debug_maps(judge, ae_model, img, label, mask, debug_dir)
