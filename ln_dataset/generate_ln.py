@@ -17,7 +17,7 @@ from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
 from ln_dataset.nuisances.noise import LocalNoiseNuisance
 from ln_dataset.nuisances.pixel import LocalPixelationNuisance
 from ln_dataset.nuisances.spatial import LocalSpatialNuisance
-from ln_dataset.train_ae import ImgListDataset
+from ln_dataset.utils import ImgListDataset
 from ln_dataset.utils import NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img
 
 # ==========================================

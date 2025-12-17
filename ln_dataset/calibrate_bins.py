@@ -9,6 +9,7 @@ from ln_dataset.generate_ln import ImgListDataset, ClassifierAwareAE, Confidence
 from ln_dataset.core.masks import generate_competency_mask_hybrid
 from ln_dataset.nuisances import LocalSpatialNuisance, LocalPixelationNuisance, LocalNoiseNuisance
 from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
+from ln_dataset.utils import ImgListDataset
 
 
 def calibrate_percentile_bins(judge, dataset, device, num_samples=1000, ae=None):
@@ -47,8 +48,8 @@ def calibrate_percentile_bins(judge, dataset, device, num_samples=1000, ae=None)
 
         # --- B. Find HARDEST Score (Mimic generate_ln loop) ---
         # We need to find the lowest score the model tolerates before breaking.
-        mask = generate_competency_mask_hybrid(ae, img, models=[judge.resnet, judge.vit], area=0.15,
-                                               avoid_top_saliency=0.05, contiguous=True)
+        mask = generate_competency_mask_hybrid(ae, img, models=[judge.resnet, judge.vit], area=0.20,
+                                               avoid_top_saliency=0.15, contiguous=True)
         # We track the lowest score seen for THIS image across all valid nuisances
         current_img_lowest_valid_score = 1.0
         found_valid_perturbation = False
