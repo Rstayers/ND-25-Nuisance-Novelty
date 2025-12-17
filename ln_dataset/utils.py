@@ -34,15 +34,13 @@ class ImgListDataset(Dataset):
         self.root = root
         self.transform = transform
         self.samples = []
-
         if not os.path.exists(imglist_path):
-            raise FileNotFoundError(f"{imglist_path} not found")
+            raise FileNotFoundError(f"Image list not found at {imglist_path}")
 
         with open(imglist_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) >= 2:
-                    # parts[0] is relative path, parts[1] is label index
                     self.samples.append((parts[0], int(parts[1])))
 
     def __len__(self):
@@ -51,22 +49,15 @@ class ImgListDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         full_path = os.path.join(self.root, path)
-
         try:
-            with open(full_path, 'rb') as f:
-                # --- CRITICAL FIX ---
-                # Force Convert to RGB. ImageNet contains grayscale images (mode 'L').
-                # Without this, ToTensor() creates [1, H, W], crashing the [3, H, W] normalization.
-                img = Image.open(f).convert('RGB')
+            img = Image.open(full_path).convert('RGB')
+        except:
+            return None, None, None
 
-            if self.transform:
-                img = self.transform(img)
+        if self.transform:
+            img = self.transform(img)
+        return img, label, path
 
-            return img, label, path
-
-        except Exception as e:
-            print(f"Error loading {path}: {e}")
-            return None, label, path
 
 
 def save_tensor_as_img(tensor, path):
