@@ -11,7 +11,7 @@ from regex import F
 from torch.utils.data import Dataset
 
 from ln_dataset.core.autoencoder import get_reconstruction_error
-STATS_FILE = "ln_dataset/assets/parce_stats_full.pt"
+STATS_FILE = "ln_dataset/assets/parce.pt"
 NORM_MEAN = [0.485, 0.456, 0.406]
 NORM_STD = [0.229, 0.224, 0.225]
 
@@ -22,11 +22,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
-
-# Global Constants
-STATS_FILE = "ln_dataset/assets/parce_stats_full.pt"
-NORM_MEAN = [0.485, 0.456, 0.406]
-NORM_STD = [0.229, 0.224, 0.225]
 
 
 class ImgListDataset(Dataset):

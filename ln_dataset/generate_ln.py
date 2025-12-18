@@ -17,82 +17,99 @@ from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
 from ln_dataset.nuisances.noise import LocalNoiseNuisance
 from ln_dataset.nuisances.pixel import LocalPixelationNuisance
 from ln_dataset.nuisances.spatial import LocalSpatialNuisance
-from ln_dataset.utils import ImgListDataset
+from ln_dataset.utils import ImgListDataset, STATS_FILE
 from ln_dataset.utils import NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img
+import math
+import torch
+
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
 
 BIN_EDGES = {
-    '1': 0.863,  # > 0.863 = Level 1
-    '2': 0.722,  # > 0.722 = Level 2
-    '3': 0.582,  # > 0.582 = Level 3
-    '4': 0.440,  # > 0.440 = Level 4
-    '5': 0.000   # < 0.440 = Level 5
+    '1': 0.930,  # > 0.930 = Level 1
+    '2': 0.908,  # > 0.908 = Level 2
+    '3': 0.867,  # > 0.867 = Level 3
+    '4': 0.749,  # > 0.749 = Level 4
+    '5': 0.000   # <= 0.749 = Level 5
 }
-TOLERANCE = 0.10
 DEBUG_MAX_IMAGES = 10
 
-
+def normal_cdf(x: torch.Tensor) -> torch.Tensor:
+    # Φ(x) = 0.5 * (1 + erf(x / sqrt(2)))
+    return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 # ==========================================
-# 2. CONFIDENCE (MSP) JUDGE
+# 2. CONFIDENCE (PaRCE) JUDGE
 # ==========================================
 class ConfidenceJudge:
-    def __init__(self, device):
+    """
+    Implements PaRCE scoring (Probability + Reconstruction Competency Estimation).
+    Renamed to 'ConfidenceJudge' to maintain compatibility with existing scripts.
+    """
+
+    def __init__(self, device, ae_weights_path, parce_calib_path=STATS_FILE):
         self.device = device
 
-        # 1. Load Classifiers
-        print("Loading classifiers...")
+        print("Loading classifiers and autoencoder...")
+        # 1. Load Classifiers (Ensemble)
         self.resnet = models.resnet50(weights='IMAGENET1K_V1').to(device).eval()
         self.vit = models.vit_b_16(weights='IMAGENET1K_V1').to(device).eval()
 
+        # 2. Load Autoencoder (The "Reconstructive" part of PaRCE)
+        self.ae = ClassifierAwareAE().to(device)
+        self.ae.load_state_dict(torch.load(ae_weights_path, map_location=device))
+        self.ae.eval()
+
         # Normalizer for classifiers
         self.normalize = transforms.Normalize(mean=NORM_MEAN, std=NORM_STD)
+        calib = torch.load(parce_calib_path, map_location="cpu")
+        self.parce_means = calib["means"].to(device).float()   # [1000]
+        self.parce_stds  = calib["stds"].to(device).float()    # [1000]
+        self.parce_z     = float(calib["zscore"])
+        self.parce_eps   = 1e-6
 
+    @torch.no_grad()
     def get_competency(self, img_tensor, target_label=None):
-        """
-        MSP Estimation:
-        Score = Max( P_ensemble(c|x) )
-        """
-        with torch.no_grad():
-            # A. CLASSIFIER PROBABILITIES (Requires Normalization)
-            img_norm = self.normalize(img_tensor)
+        # A) classifier probs (your ensemble)
+        img_norm = self.normalize(img_tensor)
+        probs_r = torch.softmax(self.resnet(img_norm), dim=1)
+        probs_v = torch.softmax(self.vit(img_norm), dim=1)
+        class_probs = (probs_r + probs_v) / 2.0  # [B,1000]
 
-            logits_r = self.resnet(img_norm)
-            logits_v = self.vit(img_norm)
+        msp, pred_tensor = torch.max(class_probs, dim=1)  # [B]
+        pred_idx = int(pred_tensor.item())
 
-            # Softmax to get P(c|x)
-            probs_r = F.softmax(logits_r, dim=1)
-            probs_v = F.softmax(logits_v, dim=1)
+        # B) reconstruction loss ℓ(X) (mean MSE)
+        rec_img = self.ae(img_tensor)
+        if isinstance(rec_img, tuple):
+            rec_img = rec_img[0]
+        loss = torch.mean((rec_img - img_tensor) ** 2, dim=(1, 2, 3))  # [B]
 
-            # Ensemble Mixture
-            probs_ens = (probs_r + probs_v) / 2.0  # Shape: [1, 1000]
+        # C) actual PaRCE overall score (Eq. 7)
+        means = self.parce_means[None, :]  # [1,1000]
+        stds = (self.parce_stds[None, :] + self.parce_eps)
+        zvals = (loss[:, None] - 2.0 * means) / stds - self.parce_z  # [B,1000]
+        loss_probs = 1.0 - normal_cdf(zvals)  # [B,1000]
 
-            # B. PREDICTIONS & LOGIC (Preserved)
-            # Get the confidence and the predicted class
-            confidence, pred_tensor = torch.max(probs_ens, dim=1)
-            pred_idx = pred_tensor.item()
-            score = confidence.item()
+        scores = torch.sum(loss_probs * class_probs, dim=1)  # [B]
+        scores = scores * msp  # multiply by p_hat_c_hat (overall)
+        parce_score = float(scores.item())
 
-            # Disagreement check
-            disagreement = (probs_r.argmax(dim=1).item() != probs_v.argmax(dim=1).item())
+        disagree = (probs_r.argmax(dim=1).item() != probs_v.argmax(dim=1).item())
 
-            # Debug info
-            if target_label is not None:
-                tgt = target_label
-                tgt_prob = probs_ens[0, tgt].item()
-                debug_str = f"Conf:{score:.4f} TgtProb:{tgt_prob:.4f} Disagree:{disagreement}"
-            else:
-                debug_str = "N/A"
+        if target_label is not None:
+            debug_str = f"PaRCE:{parce_score:.3f} MSP:{float(msp.item()):.3f} loss:{float(loss.item()):.4f} z:{self.parce_z:.2f}"
+        else:
+            debug_str = "N/A"
 
-            return score, pred_idx, disagreement, debug_str
+        return parce_score, pred_idx, disagree, debug_str
 
 
 def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_dir=None):
     # 1. Generate Mask
-    mask = generate_competency_mask_hybrid(ae_model, img, models=[judge.resnet, judge.vit], area=0.20,
-                                           avoid_top_saliency=0.15, contiguous=True)
+    mask = generate_competency_mask_hybrid(ae_model, img, models=[judge.resnet, judge.vit], area=0.10,
+                                           avoid_top_saliency=0.4, contiguous=False)
 
     if debug_dir is not None:
         save_debug_maps(judge, ae_model, img, label, mask, debug_dir)
@@ -196,7 +213,7 @@ def main():
     ])
     dataset = ImgListDataset(args.data, args.imglist, transform=transform)
 
-    judge = ConfidenceJudge(device)
+    judge = ConfidenceJudge(device, ae_weights_path=args.ae_weights)
     os.makedirs(args.out_dir, exist_ok=True)
     manifest_lines = []
 
