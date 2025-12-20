@@ -1,80 +1,52 @@
 import argparse
 import os
-import pandas as pd
 
-from analysis.processing import load_and_prep, compute_aggregates, compute_ood_metrics
+from analysis.processing import load_and_prep, compute_aggregates
 from analysis.plots import (
-    plot_competency_cliff,
+    plot_CNR,
     plot_nuisance_fingerprint,
-     plot_detector_robustness,
-    plot_osa_cliff,
-    plot_osa_gap
+    plot_detector_leaderboard,
+    plot_osa_gap,
 )
-from analysis.tables import (
-    generate_detector_leaderboard, generate_master_table)
+from analysis.tables import generate_master_table
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv', required=True, help="Path to benchmark_final.csv")
-    parser.add_argument('--out_dir', default="analysis/report_output")
+    parser.add_argument("--csv", required=True, help="Path to final_benchmark.csv")
+    parser.add_argument("--out_dir", default="analysis/report_output")
     args = parser.parse_args()
 
     dirs = {
         "root": args.out_dir,
-        "stacks": os.path.join(args.out_dir, "plots", "stacks"),
-        "cliffs": os.path.join(args.out_dir, "plots", "cliffs"),
-        "alignment": os.path.join(args.out_dir, "plots", "alignment"),
+        "plots_OSA": os.path.join(args.out_dir, "plots", "OSA"),
+        "plots_CNR": os.path.join(args.out_dir, "plots", "CNR"),
+        "plots_nuisance": os.path.join(args.out_dir, "plots", "nuisance_type"),
+        "plots_leaderboard": os.path.join(args.out_dir, "plots", "leaderboard"),
         "tables": os.path.join(args.out_dir, "tables"),
-        "raw": os.path.join(args.out_dir, "raw")
+        "raw": os.path.join(args.out_dir, "raw"),
     }
-    for d in dirs.values(): os.makedirs(d, exist_ok=True)
+    for d in dirs.values():
+        os.makedirs(d, exist_ok=True)
 
-    # 1. Load & Process
     print("Processing Data...")
     raw_df, _ = load_and_prep(args.csv)
     agg_df = compute_aggregates(raw_df)
 
-    print("Calculating OOD Metrics (AUROC/FPR95)...")
-    ood_df = compute_ood_metrics(raw_df)
+    agg_path = os.path.join(dirs["raw"], "aggregated_metrics.csv")
+    agg_df.to_csv(agg_path, index=False)
+    print(f"Saved: {agg_path}")
 
-    # Save intermediates
-    agg_df.to_csv(os.path.join(dirs['raw'], "aggregated_metrics.csv"), index=False)
-    if not ood_df.empty:
-        ood_df.to_csv(os.path.join(dirs['raw'], "ood_metrics.csv"), index=False)
-
-    # 2. Plots
     print("\nGenerating Visualizations...")
-    datasets = agg_df['dataset'].unique()
-    unique_backbones = agg_df['backbone'].unique()
-
-    for ds_name in datasets:
-        # Skip ID dataset for plots
-        if "ImageNet-Val" in ds_name: continue
-
+    for ds_name in agg_df["dataset"].unique():
         print(f"  > Dataset: {ds_name}")
-        # --- NEW ARTIFACTS ---
-        plot_osa_gap(agg_df, ds_name, dirs['cliffs'])
-        # 2. Calibration Plot (Requires raw_df for confidence stats)
+        plot_osa_gap(agg_df, ds_name, dirs["plots_OSA"])
+        plot_detector_leaderboard(agg_df, ds_name, dirs["plots_leaderboard"])
+        plot_CNR(agg_df, ds_name, dirs["plots_CNR"])
+        plot_nuisance_fingerprint(agg_df, ds_name, dirs["plots_nuisance"])
 
-
-        # 4. Detector Robustness
-        plot_detector_robustness(agg_df, ds_name, dirs['cliffs'])
-        # Stacks
-        ds_subset = agg_df[agg_df['dataset'] == ds_name]
-        #combos = ds_subset[['backbone', 'detector']].drop_duplicates().values
-        #for bb, det in combos:
-        #    plot_outcomes_stack(agg_df, bb, det, ds_name, dirs['stacks'])
-        plot_osa_cliff(agg_df, ds_name, dirs['cliffs'])
-        # Cliff, Fingerprint, Alignment
-        plot_competency_cliff(agg_df, ds_name, dirs['cliffs'])
-        plot_nuisance_fingerprint(agg_df, ds_name, dirs['cliffs'])  # Saved in cliffs dir
-
-
-    # 3. Tables
     print("\nGenerating Tables...")
-    generate_master_table(agg_df, ood_df, dirs['tables'])
-
-
+    generate_master_table(agg_df, dirs["tables"])
 
 
 if __name__ == "__main__":

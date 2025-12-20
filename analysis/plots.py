@@ -1,33 +1,20 @@
+import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-import os
-
-COLORS = {
-    "Clean_Success": "#2ecc71",
-    "Nuisance_Novelty": "#3498db",
-    "Double_Failure": "#95a5a6",
-    "Contained_Misidentification": "#e74c3c"
-}
 
 
-
-def plot_competency_cliff(agg_df, dataset, out_dir):
+def plot_CNR(agg_df, dataset, out_dir):
     """
-    Plots CNR vs Severity.
-    Explicitly filters Level > 0 to match table logic.
+    CNR vs Severity (levels 1-5), faceted by backbone.
     """
-    subset = agg_df[agg_df['dataset'] == dataset].copy()
+    subset = agg_df[agg_df["dataset"] == dataset].copy()
+    subset = subset[subset["level"] > 0].copy()
+    if subset.empty:
+        return
 
-    # FIX: Filter Level 0
-    subset = subset[subset['level'] > 0]
-
-    if subset.empty: return
-
-    # Ensure CNR is calculated (if not already)
-    subset['Correct_Total'] = subset['Clean_Success'] + subset['Nuisance_Novelty']
-    subset = subset[subset['Correct_Total'] > 0]
-    subset['CNR'] = subset['Nuisance_Novelty'] / subset['Correct_Total']
+    # Remove undefined CNR (no correct samples)
+    subset = subset[subset["Correct_Total"] > 0].copy()
 
     g = sns.relplot(
         data=subset,
@@ -43,114 +30,150 @@ def plot_competency_cliff(agg_df, dataset, out_dir):
         linewidth=2.5,
         height=4,
         aspect=1.2,
-        col_wrap=3
+        col_wrap=3,
     )
 
     g.set_titles("{col_name}")
-    g.set_axis_labels("Nuisance Severity", "CNR Score")
+    g.set_axis_labels("Nuisance Severity", "CNR")
     g.set(ylim=(-0.05, 1.05))
     g.set(xticks=[1, 2, 3, 4, 5])
-    g.fig.suptitle(f"Detector Robustness across Architectures - {dataset}", fontsize=16, y=1.05)
+    g.fig.suptitle(f"CNR vs Severity — {dataset}", fontsize=16, y=1.05)
 
-    fname = os.path.join(out_dir, f"competency_cliff_faceted_{dataset}.png")
-    g.savefig(fname, dpi=300, bbox_inches='tight')
+    fname = os.path.join(out_dir, f"CNR_faceted_{dataset}.png")
+    g.savefig(fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"Generated Faceted Plot: {os.path.basename(fname)}")
+    print(f"Generated: {os.path.basename(fname)}")
 
 
-# ... (Keep other plots: plot_nuisance_fingerprint, plot_accuracy_degradation, etc. unchanged) ...
 def plot_nuisance_fingerprint(agg_df, dataset, out_dir):
-    subset = agg_df[agg_df['dataset'] == dataset].copy()
-    if subset.empty: return
-    grouped = subset.groupby(['detector', 'nuisance'])['CNR'].mean().reset_index()
-    plt.figure(figsize=(12, 6))
+    """
+    Avg CNR over levels>0, per nuisance type.
+    """
+    subset = agg_df[agg_df["dataset"] == dataset].copy()
+    subset = subset[subset["level"] > 0].copy()
+    subset = subset[subset["Correct_Total"] > 0].copy()
+    if subset.empty:
+        return
+
+    grouped = (
+        subset.groupby(["backbone", "detector", "nuisance"])["CNR"]
+        .mean()
+        .reset_index()
+    )
+
     sns.set_style("whitegrid")
-    sns.barplot(data=grouped, x='nuisance', y='CNR', hue='detector', palette="rocket")
-    plt.title(f"Nuisance Fingerprint (Avg across Levels) - {dataset}", fontsize=14)
-    plt.ylabel("Avg Conditional Nuisance Rate (CNR)", fontsize=12)
-    plt.xticks(rotation=45)
-    plt.ylim(0, 1.05)
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"fingerprint_{dataset}.png"), dpi=300)
+    n_backbones = grouped["backbone"].nunique()
+    col_wrap = 3 if n_backbones > 3 else n_backbones
+
+    g = sns.catplot(
+        data=grouped,
+        kind="bar",
+        x="nuisance",
+        y="CNR",
+        hue="detector",
+        col="backbone",
+        col_wrap=col_wrap,
+        palette="rocket",
+        height=3.6,
+        aspect=1.25,
+        sharey=True,
+    )
+
+    g.set_titles("{col_name}")
+    g.set_axis_labels("Nuisance", "CNR (avg over levels>0)")
+    g.set(ylim=(0, 1.05))
+
+    for ax in g.axes.flatten():
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+
+    g.fig.suptitle(f"Nuisance Fingerprint (CNR) — {dataset}", fontsize=16, y=1.02)
+
+    fname = os.path.join(out_dir, f"fingerprint_{dataset}.png")
+    g.savefig(fname, dpi=300, bbox_inches="tight")
     plt.close()
+    print(f"Generated: {os.path.basename(fname)}")
 
 
+def plot_detector_leaderboard(agg_df, dataset, out_dir):
+    """
+    Detector leaderboard plotted as NNR = NN/Total (unconditional nuisance novelty).
+    This fixes the previous mismatch where the title said CNR but the value was NN/Total.
+    """
+    subset = agg_df[agg_df["dataset"] == dataset].copy()
+    subset = subset[subset["level"] > 0].copy()
+    if subset.empty:
+        return
 
+    grouped = (
+        subset.groupby(["backbone", "detector"])[["NNR"]]
+        .mean()
+        .reset_index()
+        .rename(columns={"NNR": "Mean_NNR"})
+    )
 
+    det_order = (
+        grouped.groupby("detector")["Mean_NNR"]
+        .mean()
+        .sort_values(ascending=False)
+        .index
+        .tolist()
+    )
 
-def plot_osa_cliff(agg_df, dataset, out_dir):
-    subset = agg_df[agg_df['dataset'] == dataset].copy()
-    if subset.empty: return
-    subset = subset[subset['level'] > 0]
-    grouped = subset.groupby(['backbone', 'detector', 'level'])['OSA'].mean().reset_index()
-    backbones = grouped['backbone'].unique()
-    for bb in backbones:
-        bb_data = grouped[grouped['backbone'] == bb]
-        plt.figure(figsize=(10, 6))
-        sns.set_style("whitegrid")
-        sns.lineplot(data=bb_data, x='level', y='OSA', hue='detector', style='detector', markers=True, dashes=False,
-                     linewidth=2.5, markersize=8)
-        plt.title(f"Operational OSA Degradation: {dataset} ({bb})", fontsize=15)
-        plt.ylabel("OSA (Correct & Accepted)", fontsize=12)
-        plt.xlabel("Severity Level", fontsize=12)
-        plt.ylim(-0.05, 1.05)
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Detector")
-        plt.tight_layout()
-        fname = f"osa_cliff_{dataset}_{bb}.png"
-        plt.savefig(os.path.join(out_dir, fname), dpi=300)
-        plt.close()
-
-
-
-
-
-def plot_detector_robustness(agg_df, dataset, out_dir):
-    subset = agg_df[agg_df['dataset'] == dataset].copy()
-    if subset.empty: return
-    grouped = subset.groupby('detector')[['Nuisance_Novelty', 'Total']].sum().reset_index()
-    grouped['Success_Rate'] = grouped['Nuisance_Novelty'] / grouped['Total']
-    plt.figure(figsize=(10, 6))
     sns.set_style("whitegrid")
-    grouped = grouped.sort_values('Success_Rate', ascending=False)
-    sns.barplot(data=grouped, x='detector', y='Success_Rate', palette="magma")
-    plt.title(f"Detector Robustness: Nuisance Novelty Rate - {dataset}")
-    plt.ylabel("Nuisance Novelty Rate (%)")
-    plt.ylim(0, 1.05)
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"detector_robustness_{dataset}.png"), dpi=300)
+    n_backbones = grouped["backbone"].nunique()
+    col_wrap = 3 if n_backbones > 3 else n_backbones
+
+    g = sns.catplot(
+        data=grouped,
+        kind="bar",
+        x="detector",
+        y="Mean_NNR",
+        order=det_order,
+        col="backbone",
+        col_wrap=col_wrap,
+        palette="magma",
+        height=3.6,
+        aspect=1.25,
+        sharey=True,
+    )
+
+    g.set_titles("{col_name}")
+    g.set_axis_labels("Detector", "Mean NNR (NN/Total, levels>0)")
+    g.set(ylim=(0, 1.05))
+
+    for ax in g.axes.flatten():
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+
+    g.fig.suptitle(f"Detector Leaderboard (NNR) — {dataset}", fontsize=16, y=1.02)
+
+    fname = os.path.join(out_dir, f"detector_leaderboard_NNR_{dataset}.png")
+    g.savefig(fname, dpi=300, bbox_inches="tight")
     plt.close()
+    print(f"Generated: {os.path.basename(fname)}")
 
-
-# ... existing imports ...
 
 def plot_osa_gap(agg_df, dataset, out_dir):
     """
-    Plots Classifier Accuracy vs OSA (Operational Open-Set Accuracy) side-by-side.
-    Visualizes the "Collapse" of OSA relative to the Classifier's performance.
+    Accuracy vs OSA_ID (accepted-correct) to visualize 'collapse' across severity.
     """
-    subset = agg_df[agg_df['dataset'] == dataset].copy()
-    if subset.empty: return
+    subset = agg_df[agg_df["dataset"] == dataset].copy()
+    if subset.empty:
+        return
 
-    # 1. Aggregate across nuisances (Mean over nuisances per level)
-    # We include Level 0 to show the starting gap (if any)
-    grouped = subset.groupby(['backbone', 'detector', 'level'])[['Accuracy', 'OSA']].mean().reset_index()
+    grouped = subset.groupby(["backbone", "detector", "level"])[["Accuracy", "OSA_ID"]].mean().reset_index()
 
-    # 2. Melt to Long Format for Seaborn
     melted = grouped.melt(
-        id_vars=['backbone', 'detector', 'level'],
-        value_vars=['Accuracy', 'OSA'],
-        var_name='Metric',
-        value_name='Score'
+        id_vars=["backbone", "detector", "level"],
+        value_vars=["Accuracy", "OSA_ID"],
+        var_name="Metric",
+        value_name="Score",
     )
 
-    # 3. Plot per Backbone
-    backbones = melted['backbone'].unique()
-
+    backbones = melted["backbone"].unique()
     for bb in backbones:
-        bb_data = melted[melted['backbone'] == bb]
+        bb_data = melted[melted["backbone"] == bb]
 
-        # Accuracy = Blue (Base), OSA = Red (Collapse)
-        palette = {"Accuracy": "#3498db", "OSA": "#e74c3c"}
+        palette = {"Accuracy": "#3498db", "OSA_ID": "#e74c3c"}
 
         g = sns.relplot(
             data=bb_data,
@@ -159,23 +182,24 @@ def plot_osa_gap(agg_df, dataset, out_dir):
             hue="Metric",
             style="Metric",
             col="detector",
-            col_wrap=4,  # 4 detectors per row for readability
+            col_wrap=4,
             kind="line",
             markers=True,
             dashes=False,
             height=3.5,
             aspect=1.2,
             palette=palette,
-            linewidth=2.5
+            linewidth=2.5,
         )
 
         g.set_titles("{col_name}")
-        g.set_axis_labels("Severity Level", "Score (0-1)")
+        g.set_axis_labels("Severity Level", "Score (0–1)")
         g.set(ylim=(-0.05, 1.05))
         g.set(xticks=[0, 1, 2, 3, 4, 5])
 
-        g.fig.suptitle(f"Classifier Accuracy vs OSA Collapse: {dataset} ({bb})", fontsize=16, y=1.02)
+        g.fig.suptitle(f"Accuracy vs OSA_ID Collapse — {dataset} ({bb})", fontsize=16, y=1.02)
 
         fname = os.path.join(out_dir, f"osa_gap_{dataset}_{bb}.png")
-        g.savefig(fname, dpi=300, bbox_inches='tight')
+        g.savefig(fname, dpi=300, bbox_inches="tight")
         plt.close()
+        print(f"Generated: {os.path.basename(fname)}")

@@ -80,11 +80,11 @@ def OSA(gt: torch.Tensor, pred: torch.Tensor, prob: torch.Tensor, thresh: float,
     # If threshold is given, compute OSA and idx
     if thresh:
         thresh_mask = unique_prob < thresh
-        thresh_idx = torch.argmax(thresh_mask)
+        thresh_idx = torch.argmax(thresh_mask.to(torch.int))
         osa_score = total_accuracy[thresh_idx]
-        print('Max OSA', plt.title, osa_score.item())
+        print('Max OSA', algo_name, osa_score.item())
         
-        return (total_accuracy, URR, plt.title, thresh_idx), osa_score.item()
+        return (total_accuracy, URR, algo_name, thresh_idx), osa_score.item()
     
     # If threshold is not known, compute and return it.
     else:

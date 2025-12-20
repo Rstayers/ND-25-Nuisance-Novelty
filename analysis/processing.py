@@ -1,126 +1,99 @@
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score, roc_curve
 
 
-def load_and_prep(csv_path):
+REQUIRED_OUTCOMES = [
+    "Clean_Success",
+    "Nuisance_Novelty",
+    "Double_Failure",
+    "Contained_Misidentification",
+]
+
+
+def load_and_prep(csv_path: str):
+    """
+    Loads the benchmark CSV. Does not assume any particular dataset naming
+    (e.g., no 'ImageNet-Val' heuristics).
+    """
     df = pd.read_csv(csv_path)
-    required_outcomes = [
-        "Clean_Success", "Nuisance_Novelty",
-        "Double_Failure", "Contained_Misidentification"
-    ]
-    return df, required_outcomes
+
+    # Normalize outcome dtype
+    if "outcome" in df.columns:
+        df["outcome"] = df["outcome"].astype(str)
+
+    # Ensure required columns exist (best-effort; fail loudly if core columns missing)
+    needed = {"backbone", "detector", "dataset", "nuisance", "level", "outcome"}
+    missing = needed - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV missing required columns: {sorted(list(missing))}")
+
+    # Ensure level is numeric
+    df["level"] = pd.to_numeric(df["level"], errors="coerce").fillna(0).astype(int)
+
+    return df, REQUIRED_OUTCOMES
 
 
-# processing.py
-
-def compute_aggregates(df):
+def compute_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregates row-level data and calculates key metrics:
-    - Accuracy (Class Correctness)
-    - Rejection Rate (Detector Sensitivity)
-    - OSA (Operational Open-Set Accuracy)
-    - CNR (Correct Nuisance Rejection)
+    Aggregates row-level data and calculates key ID-only nuisance metrics.
+
+    Definitions (per group):
+      CS = Clean_Success (correct & accepted)
+      NN = Nuisance_Novelty (correct & rejected)
+      DF = Double_Failure (incorrect & rejected)
+      CM = Contained_Misidentification (incorrect & accepted)
+      Total = CS + NN + DF + CM
+
+    Metrics:
+      Mean_ID_Acc (Accuracy)  = (CS+NN)/Total
+      OSA_ID                  = CS/Total  (accepted & correct under threshold)
+      CNR                     = NN/(CS+NN) (conditional rejection among correct)
+      Rejection_Rate          = (NN+DF)/Total
+      NNR                     = NN/Total (unconditional nuisance novelty rate)
+      CM_Rate                 = CM/Total
+      DF_Rate                 = DF/Total
+      OSA_Gap                 = Accuracy - OSA_ID
+      Accept_Rate             = (CS+CM)/Total
     """
-    cols = ['backbone', 'detector', 'dataset', 'nuisance', 'level', 'outcome']
-    agg = df.groupby(cols).size().unstack(fill_value=0).reset_index()
+    group_cols = ["backbone", "detector", "dataset", "nuisance", "level", "outcome"]
+    agg = df.groupby(group_cols).size().unstack(fill_value=0).reset_index()
 
-    # Ensure columns exist
-    for col in ["Clean_Success", "Nuisance_Novelty", "Double_Failure", "Contained_Misidentification"]:
-        if col not in agg.columns: agg[col] = 0
+    # Ensure outcome columns exist
+    for col in REQUIRED_OUTCOMES:
+        if col not in agg.columns:
+            agg[col] = 0
 
-    # Total Samples per group
-    agg['Total'] = (agg['Clean_Success'] + agg['Nuisance_Novelty'] +
-                    agg['Double_Failure'] + agg['Contained_Misidentification'])
+    CS = agg["Clean_Success"].astype(float)
+    NN = agg["Nuisance_Novelty"].astype(float)
+    DF = agg["Double_Failure"].astype(float)
+    CM = agg["Contained_Misidentification"].astype(float)
 
-    # 1. Standard Accuracy (ignoring rejection)
-    agg['Accuracy'] = (agg['Clean_Success'] + agg['Nuisance_Novelty']) / agg['Total']
+    agg["Total"] = CS + NN + DF + CM
 
-    # 2. Rejection Rate
-    agg['Rejection_Rate'] = (agg['Nuisance_Novelty'] + agg['Double_Failure']) / agg['Total']
+    # Avoid division by zero
+    denom = agg["Total"].replace(0, np.nan)
 
-    # 3. OSA (Operational Open-Set Accuracy)
-    # For ID/Nuisance: The rate of "Clean Success" (Correct Class + Accepted)
-    agg['OSA'] = agg['Clean_Success'] / agg['Total']
+    # Accuracy ignoring rejection (semantic preservation)
+    agg["Accuracy"] = (CS + NN) / denom
 
-    # 4. CNR (Correct Nuisance Rejection)
-    # Of the samples correctly classified, what % were rejected?
-    # (High CNR = Good Safety/Warning behavior)
-    correct_total = agg['Clean_Success'] + agg['Nuisance_Novelty']
-    # Avoid Division by Zero
-    agg['CNR'] = agg['Nuisance_Novelty'] / correct_total
-    agg['CNR'] = agg['CNR'].fillna(0.0)
+    # OSA on ID-only data: accepted & correct rate under operational threshold
+    agg["OSA_ID"] = CS / denom
 
+    # Conditional nuisance rejection among correct predictions
+    correct_total = (CS + NN).replace(0, np.nan)
+    agg["Correct_Total"] = CS + NN
+    agg["CNR"] = NN / correct_total
+
+    # Rejection / failure mode rates
+    agg["Rejection_Rate"] = (NN + DF) / denom
+    agg["NNR"] = NN / denom
+    agg["CM_Rate"] = CM / denom
+    agg["DF_Rate"] = DF / denom
+    agg["Accept_Rate"] = (CS + CM) / denom
+
+    # Decoupling summary
+    agg["OSA_Gap"] = agg["Accuracy"] - agg["OSA_ID"]
+
+    # Keep NaNs (do NOT fill CNR=0 when Correct_Total=0; that hides collapse)
+    # Users can decide how to aggregate NaNs later.
     return agg
-
-
-def compute_ood_metrics(raw_df):
-    """
-    Calculates standard OOD metrics (AUROC, FPR95) for detecting
-    Nuisance (Pos) vs ID (Neg) based on Confidence.
-    """
-    # 1. Identify ID data (Calibration set)
-    # We assume 'ImageNet-Val' or similar is the ID set.
-    # Usually ID has level=0 and nuisance='clean' or 'ImageNet-Val'
-    # Let's assume any dataset containing 'ImageNet-Val' or 'ID' is ID.
-    id_df = raw_df[raw_df['dataset'].str.contains("ImageNet-Val", case=False, na=False)].copy()
-
-    if id_df.empty:
-        # Fallback: try finding level 0 clean data?
-        # Or just return empty if no ID data found in CSV
-        print("Warning: No ID data found for AUROC calculation.")
-        return pd.DataFrame()
-
-    id_df['target'] = 0  # Negative Class (ID)
-
-    metrics = []
-
-    # Group Nuisance Data by (Backbone, Detector, Dataset, Level)
-    # We treat each Level as a separate OOD detection task
-    groups = raw_df.groupby(['backbone', 'detector', 'dataset', 'level'])
-
-    for (bb, det, ds, lvl), group in groups:
-        # Skip ID data itself
-        if "ImageNet-Val" in ds: continue
-
-        # Skip Level 0 (usually clean)
-        if lvl == 0: continue
-
-        # Filter ID data for this backbone/detector
-        curr_id = id_df[
-            (id_df['backbone'] == bb) &
-            (id_df['detector'] == det)
-            ].copy()
-
-        if curr_id.empty: continue
-
-        # OOD Data (Positive Class)
-        curr_ood = group.copy()
-        curr_ood['target'] = 1
-
-        # Merge
-        combined = pd.concat([curr_id, curr_ood])
-        y_true = combined['target'].values
-        # Score: We want OOD to have HIGHER score.
-        # Confidence is high for ID. So Score = -Confidence (or 1-Conf)
-        y_score = -combined['confidence'].values
-
-        # AUROC
-        auroc = roc_auc_score(y_true, y_score)
-
-        # FPR @ 95% TPR
-        fpr, tpr, _ = roc_curve(y_true, y_score)
-        # Find index where TPR >= 0.95
-        idx = np.where(tpr >= 0.95)[0][0]
-        fpr95 = fpr[idx]
-
-        metrics.append({
-            'backbone': bb,
-            'detector': det,
-            'dataset': ds,
-            'level': lvl,
-            'AUROC': auroc,
-            'FPR95': fpr95
-        })
-
-    return pd.DataFrame(metrics)

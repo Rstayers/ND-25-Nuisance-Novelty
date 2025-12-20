@@ -9,7 +9,8 @@ from torchvision.models.vision_transformer import VisionTransformer
 from torchvision.models.swin_transformer import SwinTransformer
 from torchvision.models.convnext import ConvNeXt
 from torchvision.models.densenet import DenseNet
-
+from torchvision.models.regnet import RegNet
+from torchvision.models.efficientnet import EfficientNet  # <--- ADD THIS
 
 class OpenOODWrapper(nn.Module):
     """
@@ -83,6 +84,14 @@ class OpenOODWrapper(nn.Module):
             x = self.model.avgpool(x)
             x = self.convnext_norm(x)
             x = self.convnext_flatten(x)
+            return x
+        elif isinstance(self.model, models.RegNet):
+            # RegNet structure: stem -> trunk_output -> avgpool (AdaptiveAvgPool2d) -> flatten -> fc
+            x = self.model.stem(x)
+            x = self.model.trunk_output(x)
+            if hasattr(self.model, "avgpool"):
+                x = self.model.avgpool(x)
+            x = torch.flatten(x, 1)
             return x
 
         # --- B. Vision Transformer (ViT) ---
@@ -173,6 +182,10 @@ def load_backbone(name, device):
         base = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1)
     elif name == 'densenet121':
         base = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+    elif name == 'regnet_y_8gf':
+        base = models.regnet_y_8gf(weights=models.RegNet_Y_8GF_Weights.IMAGENET1K_V1)
+    elif name == 'efficientnet_v2_s':
+        base = models.efficientnet_v2_s(weights=models.EfficientNet_V2_S_Weights.IMAGENET1K_V1)
     else:
         raise ValueError(f"Backbone {name} not supported.")
 
