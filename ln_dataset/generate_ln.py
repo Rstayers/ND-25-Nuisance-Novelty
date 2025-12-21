@@ -24,26 +24,60 @@ from ln_dataset.utils import ImgListDataset, STATS_FILE, NORM_MEAN, NORM_STD, sa
 # ==========================================
 
 BIN_EDGES = {
-    '1': 0.918,  # > 0.918 = Level 1
-    '2': 0.887,  # > 0.887 = Level 2
-    '3': 0.726,  # > 0.834 = Level 3
-    '4': 0.550,  # > 0.726 = Level 4
-    '5': 0.000   # <= 0.726 = Level 5
+    '1': 0.789,  # > 0.789 = Level 1
+    '2': 0.756,  # > 0.756 = Level 2
+    '3': 0.725,  # > 0.725 = Level 3
+    '4': 0.671,  # > 0.671 = Level 4
+    '5': 0.000   # <= 0.671 = Level 5
 }
 DEBUG_MAX_IMAGES = 30
 
-
+def load_bin_edges_json(path: str) -> dict:
+    with open(path, "r") as f:
+        payload = json.load(f)
+    edges = payload.get("BIN_EDGES", payload)
+    # normalize keys to strings "1".."5"
+    edges = {str(k): float(v) for k, v in edges.items()}
+    for k in ["1", "2", "3", "4"]:
+        if k not in edges:
+            raise ValueError(f"Missing BIN_EDGES['{k}'] in {path}")
+    edges["5"] = 0.0
+    return edges
 def normal_cdf(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
+def load_tv_model(name: str, device: torch.device):
+    name = name.strip().lower()
+    # Prefer enum weights if available; fallback to string for older torchvision.
+    def _w(enum_path: str, fallback: str = "IMAGENET1K_V1"):
+        try:
+            mod, enum = enum_path.rsplit(".", 1)
+            W = getattr(__import__(mod, fromlist=[enum]), enum)
+            return getattr(W, "DEFAULT", None) or getattr(W, fallback)
+        except Exception:
+            return fallback
 
+    if name in ["resnet50", "rn50"]:
+        m = models.resnet50(weights=_w("torchvision.models.ResNet50_Weights"))
+    elif name in ["vit_b_16", "vitb16", "vit"]:
+        m = models.vit_b_16(weights=_w("torchvision.models.ViT_B_16_Weights"))
+    elif name in ["convnext_t", "convnext_tiny", "cnext_tiny"]:
+        m = models.convnext_tiny(weights=_w("torchvision.models.ConvNeXt_Tiny_Weights"))
+    elif name in ["densenet121", "densenet"]:
+        m = models.densenet121(weights=_w("torchvision.models.DenseNet121_Weights"))
+    else:
+        raise ValueError(f"Unknown model name: {name}")
+    return m.to(device).eval()
 # ==========================================
 # 2. CONFIDENCE (PaRCE) JUDGE
 # ==========================================
 class ConfidenceJudge:
-    def __init__(self, device, ae_weights_path, parce_calib_path=STATS_FILE):
+    def __init__(self, device,
+                 ae_weights_path, parce_calib_path=STATS_FILE,
+                 ensemble=("resnet50","vit_b_16", "convnext_t", "densenet121"), min_agree=1.0):
         self.device = device
-
+        self.models = [load_tv_model(n, device) for n in ensemble]
+        self.min_agree = float(min_agree)
         print("Loading classifiers and autoencoder...")
         self.resnet = models.resnet50(weights='IMAGENET1K_V1').to(device).eval()
         self.vit = models.vit_b_16(weights='IMAGENET1K_V1').to(device).eval()
@@ -62,12 +96,22 @@ class ConfidenceJudge:
     @torch.no_grad()
     def get_competency(self, img_tensor, target_label=None):
         img_norm = self.normalize(img_tensor)
-        probs_r = torch.softmax(self.resnet(img_norm), dim=1)
-        probs_v = torch.softmax(self.vit(img_norm), dim=1)
-        class_probs = (probs_r + probs_v) / 2.0
 
+        probs = []
+        preds = []
+        for m in self.models:
+            p = torch.softmax(m(img_norm), dim=1)
+            probs.append(p)
+            preds.append(int(p.argmax(dim=1).item()))
+
+        class_probs = torch.stack(probs, dim=0).mean(dim=0)  # [1,C]
         msp, pred_tensor = torch.max(class_probs, dim=1)
         pred_idx = int(pred_tensor.item())
+
+        # majority vote agreement (vs strict unanimity)
+        vote = max(set(preds), key=preds.count)
+        agree_frac = preds.count(vote) / max(1, len(preds))
+        disagree = agree_frac < self.min_agree
 
         rec_img = self.ae(img_tensor)
         if isinstance(rec_img, tuple):
@@ -82,8 +126,6 @@ class ConfidenceJudge:
         scores = torch.sum(loss_probs * class_probs, dim=1)
         scores = scores * msp
         parce_score = float(scores.item())
-
-        disagree = (probs_r.argmax(dim=1).item() != probs_v.argmax(dim=1).item())
 
         if target_label is not None:
             debug_str = f"PaRCE:{parce_score:.3f} MSP:{float(msp.item()):.3f} loss:{float(loss.item()):.4f} z:{self.parce_z:.2f}"
@@ -107,9 +149,11 @@ def select_adaptive_mask(judge, ae_model, img, label):
 
     # Schedule: Increase Area, Decrease Tau (sharpen familiarity), keep Saliency Avoidance low
     configs = [
-        {'area': 0.10, 'tau': 0.20, 'avoid': 0.05, 'blur': 15},  # Medium
-        {'area': 0.15, 'tau': 0.15, 'avoid': 0.05, 'blur': 15},  # Hard
-        {'area': 0.20, 'tau': 0.10, 'avoid': 0.05, 'blur': 15},  # Aggressive
+        {'area': 0.10, 'tau': 0.20, 'avoid': 0.05, 'blur': 15, 'contig': True},
+        {'area': 0.15, 'tau': 0.15, 'avoid': 0.05, 'blur': 15, 'contig': True},
+        {'area': 0.20, 'tau': 0.10, 'avoid': 0.03, 'blur': 11, 'contig': True},
+        {'area': 0.25, 'tau': 0.08, 'avoid': 0.00, 'blur': 9, 'contig': False},
+        {'area': 0.30, 'tau': 0.05, 'avoid': 0.00, 'blur': 7, 'contig': False},
     ]
 
     best_mask = None
@@ -117,7 +161,8 @@ def select_adaptive_mask(judge, ae_model, img, label):
 
     # Use Noise as the "Probe" nuisance to test mask efficacy
     probe_nuisance = LocalNoiseNuisance(severity=1)
-    probe_p = 0.75  # A reasonably strong setting to test if the mask works
+    probe_p = 0.90  # stronger probe than 0.75
+    require_edge = '4'
 
     for i, cfg in enumerate(configs):
         # 1. Generate Mask
@@ -128,7 +173,7 @@ def select_adaptive_mask(judge, ae_model, img, label):
             area=cfg['area'],
             tau=cfg['tau'],
             avoid_top_saliency=cfg['avoid'],
-            contiguous=True,  # Enforce contiguous patches
+            contiguous=cfg['contig'],  # Enforce contiguous patches
             blur_k=cfg['blur']
         )
 
@@ -144,7 +189,7 @@ def select_adaptive_mask(judge, ae_model, img, label):
         # If we are correct and confidence is low (Level 4/5), this is perfect.
 
         if is_correct:
-            if parce <= BIN_EDGES['4']:  # Success: Reject-but-correct
+            if parce <= BIN_EDGES[require_edge]:  # Success: Reject-but-correct
                 return mask  # Found an effective mask
 
             # If correct but confidence is still high, record this as a candidate
@@ -247,8 +292,14 @@ def main():
     parser.add_argument('--out_dir', type=str, default="./ln_output_v4")
     parser.add_argument('--debug_maps', action='store_true')
     parser.add_argument('--debug_max', type=int, default=DEBUG_MAX_IMAGES)
-    args = parser.parse_args()
+    parser.add_argument('--bin_edges_json', type=str, default=None, help="Path to JSON produced by calibrate_bins.py (contains BIN_EDGES).")
+    parser.add_argument('--parce_calib', type=str, default=STATS_FILE, help="Path to PaRCE calib .pt (means/stds/zscore).")
 
+    args = parser.parse_args()
+    global BIN_EDGES
+    if args.bin_edges_json is not None:
+        BIN_EDGES = load_bin_edges_json(args.bin_edges_json)
+        print("Loaded BIN_EDGES from JSON:", BIN_EDGES)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ae = ClassifierAwareAE().to(device)
@@ -261,7 +312,7 @@ def main():
     ])
     dataset = ImgListDataset(args.data, args.imglist, transform=transform)
 
-    judge = ConfidenceJudge(device, ae_weights_path=args.ae_weights)
+    judge = ConfidenceJudge(device, ae_weights_path=args.ae_weights, parce_calib_path=args.parce_calib)
     os.makedirs(args.out_dir, exist_ok=True)
     manifest_lines = []
 

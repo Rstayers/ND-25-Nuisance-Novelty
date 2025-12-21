@@ -135,9 +135,11 @@ def select_adaptive_mask(judge, ae_model, img, label):
     (based on the bootstrap BIN_EDGES), or return the best attempt.
     """
     configs = [
-        {'area': 0.10, 'tau': 0.20, 'avoid': 0.05, 'blur': 15},  # Medium
-        {'area': 0.15, 'tau': 0.15, 'avoid': 0.05, 'blur': 15},  # Hard
-        {'area': 0.20, 'tau': 0.10, 'avoid': 0.05, 'blur': 15},  # Aggressive
+        {'area': 0.10, 'tau': 0.20, 'avoid': 0.05, 'blur': 15, 'contig': True},
+        {'area': 0.15, 'tau': 0.15, 'avoid': 0.05, 'blur': 15, 'contig': True},
+        {'area': 0.20, 'tau': 0.10, 'avoid': 0.03, 'blur': 11, 'contig': True},
+        {'area': 0.25, 'tau': 0.08, 'avoid': 0.00, 'blur': 9, 'contig': False},
+        {'area': 0.30, 'tau': 0.05, 'avoid': 0.00, 'blur': 7, 'contig': False},
     ]
 
     best_mask = None
@@ -150,11 +152,11 @@ def select_adaptive_mask(judge, ae_model, img, label):
         mask = generate_competency_mask_hybrid(
             ae_model,
             img,
-            models=[judge.resnet, judge.vit],
+            models=judge.models,
             area=cfg['area'],
             tau=cfg['tau'],
             avoid_top_saliency=cfg['avoid'],
-            contiguous=True,
+            contiguous=cfg['contig'],
             blur_k=cfg['blur']
         )
 
@@ -349,7 +351,7 @@ def main():
     parser.add_argument(
         "--target_fracs",
         type=str,
-        default="0.2,0.2,0.2,0.2,0.2",
+        default="0.35,0.25,0.20,0.15,0.05",
         help="Comma-separated fractions for levels 1..5 (will be normalized).",
     )
     parser.add_argument("--iters", type=int, default=5, help="Iterations for selection-simulation refinement")

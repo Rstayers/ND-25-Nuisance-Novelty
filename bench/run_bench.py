@@ -98,28 +98,40 @@ def run_inference(model, postprocessor, loader, device, desc=""):
                 continue
             img = batch["data"].to(device)
             labels = batch["label"].to(device)
+
+            # Forward pass to get logits + features
             logits, feat = model(img, return_feature=True)
             clean_preds = logits.argmax(dim=1)
-            cached_model = CachedForwardModel(model, logits, feat)
-            _, confs = postprocessor.postprocess(cached_model, img)
+
+            # ======== FIX: Select inference mode per detector ========
+            det_name = getattr(postprocessor, "bench_name", "").lower()
+
+            # Detectors needing raw model (require grad/features): GradNorm, KNN, MDS, DICE
+            if det_name in ["gradnorm", "knn", "mds", "dice"]:
+                # Call postprocessor directly on the real model (no caching)
+                _, confs = postprocessor.postprocess(model, img)
+            else:
+                # Use cached logits/features to save time for MSP/MaxLogit/React/EBO/etc.
+                cached_model = CachedForwardModel(model, logits, feat)
+                _, confs = postprocessor.postprocess(cached_model, img)
+            # ========================================================
+
             preds = clean_preds.cpu().numpy()
             confs = confs.cpu().numpy()
             labels_np = labels.cpu().numpy()
             bs = len(preds)
             for i in range(bs):
-                results.append(
-                    {
-                        "dataset": batch["dataset_name"][i],
-                        "path": batch["path"][i],
-                        "label": labels_np[i],
-                        "prediction": preds[i],
-                        "confidence": confs[i],
-                        "correct_cls": int(preds[i] == labels_np[i]),
-                        "level": batch["level"][i].item(),
-                        "nuisance": batch["nuisance"][i],
-                        "competency_parce": batch["parce"][i].item(),
-                    }
-                )
+                results.append({
+                    "dataset": batch["dataset_name"][i],
+                    "path": batch["path"][i],
+                    "label": labels_np[i],
+                    "prediction": preds[i],
+                    "confidence": confs[i],
+                    "correct_cls": int(preds[i] == labels_np[i]),
+                    "level": batch["level"][i].item(),
+                    "nuisance": batch["nuisance"][i],
+                    "competency_parce": batch["parce"][i].item(),
+                })
     return results
 
 
@@ -128,11 +140,11 @@ def main():
     parser.add_argument(
         "--backbones",
         nargs="+",
-        default=["vit_b_16", "resnet50", "densenet121", "swin_t", "regnet_y_8gf"],
+        default=["resnet50", "vit_b_16", "densenet121", "swin_t", "convnext_t"],
     )
-    parser.add_argument("--detectors", nargs="+", default=[ "msp", "react", "knn","mds", "gradnorm"])
+    parser.add_argument("--detectors", nargs="+", default=["gradnorm", "knn", "mds", "msp", "react", "ebo","maxlogit"])
     parser.add_argument("--id_dataset", default="ImageNet-Test")
-    parser.add_argument("--test_datasets", nargs="+", default=["LN_v4", "ImageNet-C"])
+    parser.add_argument("--test_datasets", nargs="+", default=["LN_v5", "ImageNet-C", "CNS"])
     parser.add_argument("--out_dir", default="analysis/bench_results")
     args = parser.parse_args()
 
@@ -144,7 +156,7 @@ def main():
 
     print("Loading ImageNet-Val for Detector Setup.")
     id_loader_val = get_loader("ImageNet-Val", batch_size=64)
-    id_loader_train = None
+    id_loader_train = get_loader("ImageNet-Train", batch_size=64)
 
     print("Loading OOSA calibration sets (ImageNetV2-Val, OpenImage-O-Surrogate).")
     id_val_loader = get_loader("ImageNetV2-Val", batch_size=64)

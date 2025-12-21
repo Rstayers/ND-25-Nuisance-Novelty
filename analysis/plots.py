@@ -195,7 +195,7 @@ def plot_osa_gap(agg_df, dataset, out_dir):
         g.set_titles("{col_name}")
         g.set_axis_labels("Severity Level", "Score (0–1)")
         g.set(ylim=(-0.05, 1.05))
-        g.set(xticks=[0, 1, 2, 3, 4, 5])
+        g.set(xticks=[1, 2, 3, 4, 5])
 
         g.fig.suptitle(f"Accuracy vs OSA_ID Collapse — {dataset} ({bb})", fontsize=16, y=1.02)
 

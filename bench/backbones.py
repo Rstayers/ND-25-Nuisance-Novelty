@@ -171,9 +171,15 @@ class OpenOODWrapper(nn.Module):
 
 def load_backbone(name, device):
     print(f"Loading backbone: {name}...")
-
+    def _w(enum_path: str, fallback: str = "IMAGENET1K_V1"):
+        try:
+            mod, enum = enum_path.rsplit(".", 1)
+            W = getattr(__import__(mod, fromlist=[enum]), enum)
+            return getattr(W, "DEFAULT", None) or getattr(W, fallback)
+        except Exception:
+            return fallback
     if name == 'resnet50':
-        base = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        base = models.resnet50(weights=_w("torchvision.models.ResNet50_Weights"))
     elif name == 'vit_b_16':
         base = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
     elif name == 'swin_t':
