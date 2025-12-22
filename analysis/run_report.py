@@ -31,6 +31,8 @@ def main():
 
     print("Processing Data...")
     raw_df, _ = load_and_prep(args.csv)
+    raw_df = raw_df[~raw_df["detector"].astype(str).str.lower().str.contains("gradnorm", na=False)].copy()
+
     agg_df = compute_aggregates(raw_df)
 
     agg_path = os.path.join(dirs["raw"], "aggregated_metrics.csv")

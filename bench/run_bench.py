@@ -8,12 +8,13 @@ import pandas as pd
 import numpy as np
 import json
 import hashlib
+
+from torchvision import models
 from tqdm import tqdm
 
 from bench.detectors import get_detector, requires_train_loader
 from bench.loader import get_loader
 from bench.backbones import load_backbone
-from bench.metrics import compute_oosa_threshold
 from bench import OSA as osa_mod
 
 

@@ -11,7 +11,19 @@ from torchvision.models.convnext import ConvNeXt
 from torchvision.models.densenet import DenseNet
 from torchvision.models.regnet import RegNet
 from torchvision.models.efficientnet import EfficientNet  # <--- ADD THIS
+WEIGHTS_VARIANT = "IMAGENET1K_V1"  # single source of truth
 
+def tv_weights(name: str):
+    name = name.lower()
+    if name == "resnet50":
+        return getattr(models.ResNet50_Weights, WEIGHTS_VARIANT)
+    if name in ["vit_b_16", "vitb16"]:
+        return getattr(models.ViT_B_16_Weights, WEIGHTS_VARIANT)
+    if name in ["convnext_t", "convnext_tiny"]:
+        return getattr(models.ConvNeXt_Tiny_Weights, WEIGHTS_VARIANT)
+    if name in ["densenet121", "densenet"]:
+        return getattr(models.DenseNet121_Weights, WEIGHTS_VARIANT)
+    raise ValueError(name)
 class OpenOODWrapper(nn.Module):
     """
     Universal wrapper to make Torchvision models compatible with OpenOOD Postprocessors.
@@ -179,15 +191,15 @@ def load_backbone(name, device):
         except Exception:
             return fallback
     if name == 'resnet50':
-        base = models.resnet50(weights=_w("torchvision.models.ResNet50_Weights"))
+        base = models.resnet50(weights=tv_weights(name))
     elif name == 'vit_b_16':
-        base = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
+        base = models.vit_b_16(tv_weights(name))
     elif name == 'swin_t':
         base = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
     elif name == 'convnext_t':
-        base = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1)
+        base = models.convnext_tiny(tv_weights(name))
     elif name == 'densenet121':
-        base = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+        base = models.densenet121(tv_weights(name))
     elif name == 'regnet_y_8gf':
         base = models.regnet_y_8gf(weights=models.RegNet_Y_8GF_Weights.IMAGENET1K_V1)
     elif name == 'efficientnet_v2_s':

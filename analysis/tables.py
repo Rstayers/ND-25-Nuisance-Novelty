@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+from analysis.processing import compute_adr  # Import the new function
 
 
 def _format_float(x):
@@ -11,75 +12,68 @@ def _format_float(x):
 
 def generate_detector_leaderboard(agg_df: pd.DataFrame, backbone: str, dataset: str, out_dir: str):
     """
-    Detector leaderboard for one (backbone, dataset).
-
-    Reports (macro over levels 1-5, and macro over nuisances):
-      - Mean_CNR
-      - Mean_NNR (unconditional nuisance novelty rate)
-      - Mean_OSA_ID
-      - Mean_ID_Acc
-      - Mean_Rej_Rate
-      - plus per-level CNR at L1/L3/L5
+    Detector leaderboard including ADR.
     """
     subset = agg_df[(agg_df["backbone"] == backbone) & (agg_df["dataset"] == dataset)].copy()
     if subset.empty:
         return
 
-    # Focus on corrupted levels only
-    subset = subset[subset["level"] > 0].copy()
-    if subset.empty:
-        return
+    # 1. Standard Aggregates (Levels > 0)
+    corrupted = subset[subset["level"] > 0].copy()
 
-    # Macro average over (nuisance, level) conditions
     per_det = (
-        subset.groupby(["detector"])[["Accuracy", "OSA_ID", "CNR", "Rejection_Rate", "NNR", "CM_Rate", "DF_Rate"]]
+        corrupted.groupby(["detector"])[["Accuracy", "OSA_ID", "CNR", "Rejection_Rate", "NNR"]]
         .mean()
         .reset_index()
-        .rename(
-            columns={
-                "Accuracy": "Mean_ID_Acc",
-                "OSA_ID": "Mean_OSA_ID",
-                "CNR": "Mean_CNR",
-                "Rejection_Rate": "Mean_Rej_Rate",
-                "NNR": "Mean_NNR",
-                "CM_Rate": "Mean_CM_Rate",
-                "DF_Rate": "Mean_DF_Rate",
-            }
-        )
+        .rename(columns={
+            "Accuracy": "Mean_ID_Acc",
+            "OSA_ID": "Mean_OSA_ID",
+            "CNR": "Mean_CNR",
+            "Rejection_Rate": "Mean_Rej_Rate",
+            "NNR": "Mean_NNR",
+        })
     )
 
-    # Per-level CNR (macro over nuisances at that level)
+    # 2. Compute ADR (Uses all levels 0-5 for slope)
+    adr_df = compute_adr(subset)
+    # Merge ADR: Note compute_adr returns keys [backbone, detector, dataset]
+    # We only need 'detector' and 'ADR' here since we already filtered by backbone/dataset
+    adr_merge = adr_df[["detector", "ADR"]]
+
+    final = per_det.merge(adr_merge, on="detector", how="left")
+
+    # 3. Per-level CNR
     lvl = (
-        subset.groupby(["detector", "level"])[["CNR"]]
+        corrupted.groupby(["detector", "level"])[["CNR"]]
         .mean()
         .reset_index()
         .pivot(index="detector", columns="level", values="CNR")
         .reset_index()
     )
     for L in [1, 3, 5]:
+        col_name = f"CNR_L{L}"
         if L in lvl.columns:
-            lvl = lvl.rename(columns={L: f"CNR_L{L}"})
+            lvl = lvl.rename(columns={L: col_name})
         else:
-            lvl[f"CNR_L{L}"] = np.nan
-    lvl = lvl[["detector", "CNR_L1", "CNR_L3", "CNR_L5"]]
+            lvl[col_name] = np.nan
 
-    final = per_det.merge(lvl, on="detector", how="left")
+    lvl = lvl[["detector"] + [c for c in lvl.columns if "CNR_L" in c]]
+    final = final.merge(lvl, on="detector", how="left")
 
     # Formatting
-    for c in [
-        "Mean_ID_Acc",
-        "Mean_OSA_ID",
-        "Mean_CNR",
-        "Mean_NNR",
-        "Mean_Rej_Rate",
-        "Mean_CM_Rate",
-        "Mean_DF_Rate",
-        "CNR_L1",
-        "CNR_L3",
-        "CNR_L5",
-    ]:
+    cols_to_format = [
+        "Mean_ID_Acc", "Mean_OSA_ID", "Mean_CNR", "Mean_NNR",
+        "Mean_Rej_Rate", "ADR", "CNR_L1", "CNR_L3", "CNR_L5"
+    ]
+
+    for c in cols_to_format:
         if c in final.columns:
             final[c] = final[c].apply(_format_float)
+
+    # Reorder columns for readability
+    head = ["detector", "ADR", "Mean_CNR", "Mean_ID_Acc", "Mean_OSA_ID"]
+    tail = [c for c in final.columns if c not in head]
+    final = final[head + tail]
 
     fname = os.path.join(out_dir, f"leaderboard_{backbone}_{dataset}.csv")
     final.to_csv(fname, index=False)
@@ -88,62 +82,45 @@ def generate_detector_leaderboard(agg_df: pd.DataFrame, backbone: str, dataset: 
 
 def generate_master_table(agg_df: pd.DataFrame, out_dir: str):
     """
-    Master table PER DATASET (ID-only nuisance evaluation).
-    Uses MACRO averaging over (nuisance, level) with level>0.
-
-    Columns reported:
-      Mean_ID_Acc
-      Mean_OSA_ID
-      Mean_OSA_Gap
-      Mean_CNR
-      Mean_NNR
-      Mean_Rej_Rate
-      Mean_CM_Rate
-      Mean_DF_Rate
-
-    NOTE: No OOD AUROC/FPR95 merges. Those were inconsistent with your CSV
-    assumptions and your benchmark goal (ID-only nuisance novelty).
+    Master table with ADR included.
     """
     df = agg_df.copy()
     corrupted = df[df["level"] > 0].copy()
-    if corrupted.empty:
-        # Fallback if no level annotation: use whatever is present
-        corrupted = df.copy()
 
+    # 1. Compute Mean Metrics
     metrics = (
         corrupted.groupby(["dataset", "backbone", "detector"])[
-            ["Accuracy", "OSA_ID", "OSA_Gap", "CNR", "NNR", "Rejection_Rate", "CM_Rate", "DF_Rate"]
+            ["Accuracy", "OSA_ID", "OSA_Gap", "CNR", "NNR", "Rejection_Rate"]
         ]
         .mean()
         .reset_index()
-        .rename(
-            columns={
-                "Accuracy": "Mean_ID_Acc",
-                "OSA_ID": "Mean_OSA_ID",
-                "OSA_Gap": "Mean_OSA_Gap",
-                "CNR": "Mean_CNR",
-                "NNR": "Mean_NNR",
-                "Rejection_Rate": "Mean_Rej_Rate",
-                "CM_Rate": "Mean_CM_Rate",
-                "DF_Rate": "Mean_DF_Rate",
-            }
-        )
-        .sort_values(["dataset", "backbone", "detector"])
+        .rename(columns={
+            "Accuracy": "Mean_ID_Acc",
+            "OSA_ID": "Mean_OSA_ID",
+            "OSA_Gap": "Mean_OSA_Gap",
+            "CNR": "Mean_CNR",
+            "NNR": "Mean_NNR",
+            "Rejection_Rate": "Mean_Rej_Rate",
+        })
     )
 
-    # Format for report CSV
-    for c in [
-        "Mean_ID_Acc",
-        "Mean_OSA_ID",
-        "Mean_OSA_Gap",
-        "Mean_CNR",
-        "Mean_NNR",
-        "Mean_Rej_Rate",
-        "Mean_CM_Rate",
-        "Mean_DF_Rate",
-    ]:
-        metrics[c] = metrics[c].apply(_format_float)
+    # 2. Compute ADR
+    adr_df = compute_adr(df)  # Pass full df to access all levels
+
+    # Merge
+    final = metrics.merge(adr_df, on=["dataset", "backbone", "detector"], how="left")
+
+    cols_to_format = [
+        "Mean_ID_Acc", "Mean_OSA_ID", "Mean_OSA_Gap",
+        "Mean_CNR", "Mean_NNR", "Mean_Rej_Rate", "ADR"
+    ]
+
+    for c in cols_to_format:
+        final[c] = final[c].apply(_format_float)
+
+    # Sort
+    final = final.sort_values(["dataset", "backbone", "detector"])
 
     fname = os.path.join(out_dir, "master_table_per_dataset.csv")
-    metrics.to_csv(fname, index=False)
+    final.to_csv(fname, index=False)
     print(f"Generated: {os.path.basename(fname)}")

@@ -9,6 +9,7 @@ import torch
 from PIL import Image
 from regex import F
 from torch.utils.data import Dataset
+from torchvision import models
 
 from ln_dataset.core.autoencoder import get_reconstruction_error
 STATS_FILE = "ln_dataset/assets/parce.pt"
@@ -22,7 +23,19 @@ from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
+WEIGHTS_VARIANT = "IMAGENET1K_V1"  # single source of truth
 
+def tv_weights(name: str):
+    name = name.lower()
+    if name == "resnet50":
+        return getattr(models.ResNet50_Weights, WEIGHTS_VARIANT)
+    if name in ["vit_b_16", "vitb16"]:
+        return getattr(models.ViT_B_16_Weights, WEIGHTS_VARIANT)
+    if name in ["convnext_t", "convnext_tiny"]:
+        return getattr(models.ConvNeXt_Tiny_Weights, WEIGHTS_VARIANT)
+    if name in ["densenet121", "densenet"]:
+        return getattr(models.DenseNet121_Weights, WEIGHTS_VARIANT)
+    raise ValueError(name)
 
 class ImgListDataset(Dataset):
     def __init__(self, root, imglist_path, transform=None):

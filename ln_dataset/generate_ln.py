@@ -17,7 +17,8 @@ from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
 from ln_dataset.nuisances.noise import LocalNoiseNuisance
 from ln_dataset.nuisances.pixel import LocalPixelationNuisance
 from ln_dataset.nuisances.spatial import LocalSpatialNuisance
-from ln_dataset.utils import ImgListDataset, STATS_FILE, NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img
+from ln_dataset.utils import ImgListDataset, STATS_FILE, NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img, \
+    tv_weights
 
 # ==========================================
 # 1. CONFIGURATION
@@ -58,13 +59,13 @@ def load_tv_model(name: str, device: torch.device):
             return fallback
 
     if name in ["resnet50", "rn50"]:
-        m = models.resnet50(weights=_w("torchvision.models.ResNet50_Weights"))
+        m = models.resnet50(weights=tv_weights(name))
     elif name in ["vit_b_16", "vitb16", "vit"]:
-        m = models.vit_b_16(weights=_w("torchvision.models.ViT_B_16_Weights"))
+        m = models.vit_b_16(weights=tv_weights(name))
     elif name in ["convnext_t", "convnext_tiny", "cnext_tiny"]:
-        m = models.convnext_tiny(weights=_w("torchvision.models.ConvNeXt_Tiny_Weights"))
+        m = models.convnext_tiny(weights=tv_weights(name))
     elif name in ["densenet121", "densenet"]:
-        m = models.densenet121(weights=_w("torchvision.models.DenseNet121_Weights"))
+        m = models.densenet121(weights=tv_weights(name))
     else:
         raise ValueError(f"Unknown model name: {name}")
     return m.to(device).eval()

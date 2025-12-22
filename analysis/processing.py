@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 
-
 REQUIRED_OUTCOMES = [
     "Clean_Success",
     "Nuisance_Novelty",
@@ -12,22 +11,18 @@ REQUIRED_OUTCOMES = [
 
 def load_and_prep(csv_path: str):
     """
-    Loads the benchmark CSV. Does not assume any particular dataset naming
-    (e.g., no 'ImageNet-Val' heuristics).
+    Loads the benchmark CSV. Does not assume any particular dataset naming.
     """
     df = pd.read_csv(csv_path)
 
-    # Normalize outcome dtype
     if "outcome" in df.columns:
         df["outcome"] = df["outcome"].astype(str)
 
-    # Ensure required columns exist (best-effort; fail loudly if core columns missing)
     needed = {"backbone", "detector", "dataset", "nuisance", "level", "outcome"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"CSV missing required columns: {sorted(list(missing))}")
 
-    # Ensure level is numeric
     df["level"] = pd.to_numeric(df["level"], errors="coerce").fillna(0).astype(int)
 
     return df, REQUIRED_OUTCOMES
@@ -36,24 +31,6 @@ def load_and_prep(csv_path: str):
 def compute_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregates row-level data and calculates key ID-only nuisance metrics.
-
-    Definitions (per group):
-      CS = Clean_Success (correct & accepted)
-      NN = Nuisance_Novelty (correct & rejected)
-      DF = Double_Failure (incorrect & rejected)
-      CM = Contained_Misidentification (incorrect & accepted)
-      Total = CS + NN + DF + CM
-
-    Metrics:
-      Mean_ID_Acc (Accuracy)  = (CS+NN)/Total
-      OSA_ID                  = CS/Total  (accepted & correct under threshold)
-      CNR                     = NN/(CS+NN) (conditional rejection among correct)
-      Rejection_Rate          = (NN+DF)/Total
-      NNR                     = NN/Total (unconditional nuisance novelty rate)
-      CM_Rate                 = CM/Total
-      DF_Rate                 = DF/Total
-      OSA_Gap                 = Accuracy - OSA_ID
-      Accept_Rate             = (CS+CM)/Total
     """
     group_cols = ["backbone", "detector", "dataset", "nuisance", "level", "outcome"]
     agg = df.groupby(group_cols).size().unstack(fill_value=0).reset_index()
@@ -79,10 +56,12 @@ def compute_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     # OSA on ID-only data: accepted & correct rate under operational threshold
     agg["OSA_ID"] = CS / denom
 
-    # Conditional nuisance rejection among correct predictions
-    correct_total = (CS + NN).replace(0, np.nan)
+    # --- FIX: Explicitly save Correct_Total for plots.py filtering ---
     agg["Correct_Total"] = CS + NN
-    agg["CNR"] = NN / correct_total
+
+    # Conditional nuisance rejection among correct predictions
+    correct_total_safe = agg["Correct_Total"].replace(0, np.nan)
+    agg["CNR"] = NN / correct_total_safe
 
     # Rejection / failure mode rates
     agg["Rejection_Rate"] = (NN + DF) / denom
@@ -94,6 +73,41 @@ def compute_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     # Decoupling summary
     agg["OSA_Gap"] = agg["Accuracy"] - agg["OSA_ID"]
 
-    # Keep NaNs (do NOT fill CNR=0 when Correct_Total=0; that hides collapse)
-    # Users can decide how to aggregate NaNs later.
     return agg
+
+def compute_adr(agg_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates the Accuracy Divergence Rate (ADR).
+    ADR = Slope of (OSA_Gap vs Level).
+
+    Returns a DataFrame with columns: [backbone, detector, dataset, ADR]
+    """
+    # Filter to relevant levels (0-5) to establish slope
+    # We include level 0 if available to anchor the divergence start point.
+    subset = agg_df[agg_df["level"].between(0, 5)].copy()
+
+    results = []
+
+    # Calculate slope per (backbone, detector, dataset)
+    # We aggregate over nuisances implicitly by feeding all (level, gap) points
+    # for a specific detector into the regression. This gives the "Mean Trajectory" slope.
+    groups = subset.groupby(["backbone", "detector", "dataset"])
+
+    for (bb, det, ds), group in groups:
+        x = group["level"].values
+        y = group["OSA_Gap"].values
+
+        if len(np.unique(x)) < 2:
+            slope = np.nan
+        else:
+            # Linear fit (degree 1), return slope (index 0)
+            slope = np.polyfit(x, y, 1)[0]
+
+        results.append({
+            "backbone": bb,
+            "detector": det,
+            "dataset": ds,
+            "ADR": slope
+        })
+
+    return pd.DataFrame(results)
