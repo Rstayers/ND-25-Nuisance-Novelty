@@ -143,9 +143,9 @@ def main():
         nargs="+",
         default=["resnet50", "vit_b_16", "densenet121", "swin_t", "convnext_t"],
     )
-    parser.add_argument("--detectors", nargs="+", default=["gradnorm", "knn", "mds", "msp", "react", "ebo","maxlogit"])
+    parser.add_argument("--detectors", nargs="+", default=["knn", "msp", "react", "ebo","maxlogit"])
     parser.add_argument("--id_dataset", default="ImageNet-Test")
-    parser.add_argument("--test_datasets", nargs="+", default=["LN_v5", "ImageNet-C", "CNS"])
+    parser.add_argument("--test_datasets", nargs="+", default=["LN_v6", "ImageNet-C", "CNS"])
     parser.add_argument("--out_dir", default="analysis/bench_results")
     args = parser.parse_args()
 

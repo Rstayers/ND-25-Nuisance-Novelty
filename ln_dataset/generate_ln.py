@@ -19,6 +19,7 @@ from ln_dataset.nuisances.pixel import LocalPixelationNuisance
 from ln_dataset.nuisances.spatial import LocalSpatialNuisance
 from ln_dataset.utils import ImgListDataset, STATS_FILE, NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img, \
     tv_weights
+from ln_dataset.nuisances.sticker import LocalStickerNuisance
 
 # ==========================================
 # 1. CONFIGURATION
@@ -50,13 +51,7 @@ def normal_cdf(x: torch.Tensor) -> torch.Tensor:
 def load_tv_model(name: str, device: torch.device):
     name = name.strip().lower()
     # Prefer enum weights if available; fallback to string for older torchvision.
-    def _w(enum_path: str, fallback: str = "IMAGENET1K_V1"):
-        try:
-            mod, enum = enum_path.rsplit(".", 1)
-            W = getattr(__import__(mod, fromlist=[enum]), enum)
-            return getattr(W, "DEFAULT", None) or getattr(W, fallback)
-        except Exception:
-            return fallback
+
 
     if name in ["resnet50", "rn50"]:
         m = models.resnet50(weights=tv_weights(name))
@@ -80,8 +75,8 @@ class ConfidenceJudge:
         self.models = [load_tv_model(n, device) for n in ensemble]
         self.min_agree = float(min_agree)
         print("Loading classifiers and autoencoder...")
-        self.resnet = models.resnet50(weights='IMAGENET1K_V1').to(device).eval()
-        self.vit = models.vit_b_16(weights='IMAGENET1K_V1').to(device).eval()
+        self.resnet = models.resnet50(weights=tv_weights("resnet50")).to(device).eval()
+        self.vit = models.vit_b_16(weights=tv_weights("vit_b_16")).to(device).eval()
 
         self.ae = ClassifierAwareAE().to(device)
         self.ae.load_state_dict(torch.load(ae_weights_path, map_location=device))
@@ -211,16 +206,37 @@ def select_adaptive_mask(judge, ae_model, img, label):
     return best_mask
 
 
+def _assign_level(parce: float) -> str:
+    if parce > BIN_EDGES['1']:
+        return '1'
+    if parce > BIN_EDGES['2']:
+        return '2'
+    if parce > BIN_EDGES['3']:
+        return '3'
+    if parce > BIN_EDGES['4']:
+        return '4'
+    return '5'
+
+
+def _apply_nuisance(nuisance_obj, img, mask, p: float, seed: int):
+    """
+    Sticker should accept a seed; other nuisances will ignore it.
+    Keep it backward-compatible.
+    """
+    try:
+        return nuisance_obj.apply(img, mask, manual_param=p, seed=seed)
+    except TypeError:
+        return nuisance_obj.apply(img, mask, manual_param=p)
+
+
 def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_dir=None):
-    # 1. Adaptive Mask Generation (v4)
-    # --------------------------------
+    # 1) Mask
     mask = select_adaptive_mask(judge, ae_model, img, label)
 
     if debug_dir is not None:
         save_debug_maps(judge, ae_model, img, label, mask, debug_dir)
 
-    # 2. Define Nuisances
-    # --------------------------------
+    # 2) Nuisances (NOW includes sticker)
     nuisances = [
         (LocalNoiseNuisance(severity=1), 'noise'),
         (LocalPixelationNuisance(severity=1), 'pixelation'),
@@ -232,57 +248,91 @@ def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_d
 
     selected_samples = []
 
+    # Sweep settings
+    p_grid = np.linspace(0.05, 1.0, 50)
+
+    # More trials for stochastic nuisances
+    trials_by_name = {
+        "noise": 2,
+        "spatial": 2,
+        # deterministic-ish:
+        "pixelation": 1,
+        "brightness": 1,
+        "contrast": 1,
+        "saturation": 1,
+    }
+
+    # If we see sustained failures after having found some candidates, we can stop early
+    max_consecutive_fail_after_success = 8
+
     for nuisance_obj, n_name in nuisances:
-        best_candidates = {}
+        best_candidates = {}  # lvl -> dict(img, score, p, seed)
+        had_any_success = False
+        consecutive_fail = 0
+        n_trials = int(trials_by_name.get(n_name, 1))
 
-        # Sweep severity p (Forward: 0.05 -> 1.0)
-        for p in np.linspace(0.05, 1.0, 50):
+        for pi, p in enumerate(p_grid):
+            any_success_this_p = False
 
-            # Apply Nuisance
-            img_perturbed = nuisance_obj.apply(img, mask, manual_param=p)
+            for ti in range(n_trials):
+                # deterministic seed per (image, nuisance, p-index, trial)
+                seed = (hash(base_name) ^ hash(n_name) ^ (pi * 10007) ^ (ti * 1009)) & 0x7FFFFFFF
 
-            # Measure Competency
-            parce, pred, disagree, _ = judge.get_competency(img_perturbed, target_label=label)
+                img_perturbed = _apply_nuisance(nuisance_obj, img, mask, float(p), seed)
 
-            # STOP if model fails (we want correct but low-confidence)
-            if disagree or (pred != label):
-                break
+                parce, pred, disagree, _ = judge.get_competency(img_perturbed, target_label=label)
 
-            # Identify Bin
-            assigned_lvl = None
-            if parce > BIN_EDGES['1']:
-                assigned_lvl = '1'
-            elif parce > BIN_EDGES['2']:
-                assigned_lvl = '2'
-            elif parce > BIN_EDGES['3']:
-                assigned_lvl = '3'
-            elif parce > BIN_EDGES['4']:
-                assigned_lvl = '4'
-            else:
-                assigned_lvl = '5'
+                if disagree or (pred != label):
+                    continue  # IMPORTANT: don't break; try another draw / next p
 
-            # Update Candidate (Overwrite with harder 'p' for same level)
-            if assigned_lvl:
-                best_candidates[assigned_lvl] = {
-                    'img': img_perturbed,
-                    'p': p,
-                    'score': parce,
-                    'level': assigned_lvl
-                }
+                any_success_this_p = True
+                had_any_success = True
+                consecutive_fail = 0
 
-        # Save Results
+                lvl = _assign_level(float(parce))
+
+                # MINIMIZATION: keep the lowest PaRCE in this level (hardest sample in-bin)
+                prev = best_candidates.get(lvl, None)
+                if (prev is None) or (float(parce) < float(prev["score"])):
+                    best_candidates[lvl] = {
+                        "img": img_perturbed.detach(),
+                        "p": float(p),
+                        "score": float(parce),
+                        "seed": int(seed),
+                    }
+
+            if not any_success_this_p:
+                if had_any_success:
+                    consecutive_fail += 1
+                    if consecutive_fail >= max_consecutive_fail_after_success:
+                        break  # we’ve likely gone past the feasible region
+
+        # Save + return paths (same contract as your current code)
         for lvl, data in best_candidates.items():
             level_dir = os.path.join(output_dir, n_name, lvl)
             os.makedirs(level_dir, exist_ok=True)
 
             fname = f"{base_name}.png"
             save_path = os.path.join(level_dir, fname)
+            save_tensor_as_img(data["img"], save_path)
 
-            save_tensor_as_img(data['img'], save_path)
             rel_path = os.path.join(n_name, lvl, fname).replace("\\", "/")
-            selected_samples.append({'path': rel_path})
+            selected_samples.append({"path": rel_path})
+
+            # Optional: save metadata for debugging / reproducibility
+            meta_path = os.path.join(level_dir, f"{base_name}.json")
+            try:
+                with open(meta_path, "w") as f:
+                    json.dump(
+                        {"p": data["p"], "parce": data["score"], "seed": data["seed"], "nuisance": n_name, "level": lvl},
+                        f,
+                        indent=2,
+                    )
+            except Exception:
+                pass
 
     return selected_samples
+
 
 
 def main():
