@@ -10,7 +10,7 @@ from tqdm import tqdm
 from PIL import Image
 import time
 
-# NEW: Import the Classifier-Aware Model
+# Custom AE
 from ln_dataset.core.autoencoder import ClassifierAwareAE
 
 
@@ -19,14 +19,13 @@ class ImgListDataset(torch.utils.data.Dataset):
         self.root = root
         self.transform = transform
         self.samples = []
-
         if not os.path.exists(imglist_path):
             raise FileNotFoundError(f"List not found: {imglist_path}")
-
         with open(imglist_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) >= 1:
+                    # Handle paths with spaces or just take the first part
                     self.samples.append(parts[0])
 
     def __len__(self):
@@ -37,8 +36,7 @@ class ImgListDataset(torch.utils.data.Dataset):
         full_path = os.path.join(self.root, path)
         try:
             img = Image.open(full_path).convert('RGB')
-        except Exception as e:
-            print(f"Warning: Corrupt image {full_path}. Returning black.")
+        except:
             return torch.zeros((3, 224, 224))
 
         if self.transform:
@@ -46,91 +44,80 @@ class ImgListDataset(torch.utils.data.Dataset):
         return img
 
 
-def train_classifier_aware(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Initializing Classifier-Aware Trainer on {device}...")
-
-    os.makedirs(args.save_dir, exist_ok=True)
-    debug_dir = os.path.join(args.save_dir, "debug_recon_features")
-    os.makedirs(debug_dir, exist_ok=True)
-
-    # Data Prep: Input is [0, 1]. Normalization happens inside the model forward().
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),  # [0, 1]
-    ])
-
-    dataset = ImgListDataset(args.data, args.imglist, transform=transform)
-
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=True
-    )
-
-    print(f"Dataset: {len(dataset)} images.")
-
-    # Initialize New Model
-    print("Loading Backbones (ResNet50 + ViT-B/16)... this may trigger a download.")
-    model = ClassifierAwareAE().to(device)
-
-    # Optimizer: Only train the Decoder!
-    # (The backbones are frozen in the class __init__)
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-
-    criterion = nn.MSELoss()
-
-    print("Starting Training (1 Full Epoch)...")
-    model.train()  # This puts Decoder in train mode (Backbones stay frozen)
-
-    start_time = time.time()
-    running_loss = 0.0
-    save_interval = 500
-
-    pbar = tqdm(loader, desc="Training Feature Decoder")
-
-    for step, img in enumerate(pbar):
-        img = img.to(device)
-
-        optimizer.zero_grad()
-
-        # Forward (Norm -> Feat Extract -> Decode)
-        output = model(img)
-
-        # Loss (Reconstruction vs Original Image)
-        loss = criterion(output, img)
-
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-        pbar.set_postfix({'loss': f"{loss.item():.6f}"})
-
-        if step % save_interval == 0:
-            comparison = torch.cat([img[:8], output[:8]])
-            save_image(comparison, os.path.join(debug_dir, f"step_{step}.png"))
-            torch.save(model.state_dict(), os.path.join(args.save_dir, "ae_latest.pth"))
-
-    final_path = os.path.join(args.save_dir, "ae_classifier_aware_weights.pth")
-    torch.save(model.state_dict(), final_path)
-
-    elapsed = time.time() - start_time
-    print(f"\nTraining Complete. Saved to {final_path}")
-
-
-if __name__ == "__main__":
+def train():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', type=str, required=True, help="Path to ImageNet TRAIN set")
-    parser.add_argument('--imglist', type=str, required=True, help="Path to train.txt list")
-    parser.add_argument('--save_dir', type=str, default="./ln_dataset/assets")
+    parser.add_argument('--data', type=str, required=True, help="Root image folder")
+    parser.add_argument('--imglist', type=str, required=True, help="Path to train list")
+    parser.add_argument('--save_dir', type=str, default="checkpoints")
 
-    # Reduced batch size due to heavy backbones
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--workers', type=int, default=4)
+    # NEW ARGUMENTS FOR CUSTOM WEIGHTS
+    parser.add_argument('--resnet_ckpt', type=str, default=None, help="Path to custom ResNet50 .pth")
+    parser.add_argument('--vit_ckpt', type=str, default=None, help="Path to custom ViT .pth")
 
     args = parser.parse_args()
 
-    train_classifier_aware(args)
+    os.makedirs(args.save_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # --- Initialize Model with Custom Weights ---
+    model = ClassifierAwareAE(
+        resnet_path=args.resnet_ckpt,
+        vit_path=args.vit_ckpt
+    ).to(device)
+
+    # Transform (Resize + ToTensor)
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.RandomCrop((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        # Note: Do NOT normalize here. The AE class handles normalization internally.
+        # It expects input in range [0, 1].
+    ])
+
+    dataset = ImgListDataset(args.data, args.imglist, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
+
+    optimizer = optim.Adam(model.decoder.parameters(), lr=1e-3)
+    criterion = nn.MSELoss()
+
+    print(f"Training AE on {len(dataset)} images...")
+
+    # Train Loop
+    epochs = 1
+    global_step = 0
+
+    for epoch in range(epochs):
+        model.decoder.train()
+        pbar = tqdm(dataloader)
+        running_loss = 0.0
+
+        for img in pbar:
+            img = img.to(device)
+            optimizer.zero_grad()
+
+            output = model(img)
+            loss = criterion(output, img)
+
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            pbar.set_postfix({'epoch': epoch + 1, 'loss': f"{loss.item():.5f}"})
+
+            global_step += 1
+            if global_step % 500 == 0:
+                # Save debug image
+                debug_path = os.path.join(args.save_dir, f"epoch_{epoch}_step_{global_step}.png")
+                save_image(torch.cat([img[:8], output[:8]]), debug_path)
+
+        # Save Checkpoint per epoch
+        torch.save(model.state_dict(), os.path.join(args.save_dir, "ae_latest.pth"))
+
+    final_path = os.path.join(args.save_dir, "ae_classifier_aware_weights.pth")
+    torch.save(model.state_dict(), final_path)
+    print(f"Saved final weights to {final_path}")
+
+
+if __name__ == "__main__":
+    train()

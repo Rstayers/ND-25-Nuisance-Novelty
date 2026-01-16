@@ -5,108 +5,116 @@ from torchvision.models.feature_extraction import create_feature_extractor
 
 
 class ClassifierAwareAE(nn.Module):
-    def __init__(self):
+    def __init__(self, resnet_path=None, vit_path=None):
         super(ClassifierAwareAE, self).__init__()
 
-        # --- 1. Frozen Backbones (The "Classifier" Part) ---
-        # We use both ResNet50 (Texture biased) and ViT (Shape biased)
-        # to ensure the 'competency' is robust across architectures.
-
-        # ResNet-50
+        # --- 1. Initialize Backbones (ImageNet Structure) ---
+        print("Initializing Backbones...")
         resnet = models.resnet50(weights='IMAGENET1K_V1')
-        # Extract 'layer3' -> Output is (B, 1024, 14, 14) for 224x224 input
+        vit = models.vit_b_16(weights='IMAGENET1K_V1')
+
+        # --- 2. Load Custom CUB Weights (If provided) ---
+        if resnet_path:
+            self._load_weights(resnet, resnet_path, "ResNet50")
+
+        if vit_path:
+            self._load_weights(vit, vit_path, "ViT-B/16")
+
+        # --- 3. Extract Features ---
+        # ResNet: Extract 'layer3' -> (B, 1024, 14, 14)
         self.resnet_ext = create_feature_extractor(resnet, return_nodes={'layer3': 'feat'})
 
-        # ViT-B/16
-        vit = models.vit_b_16(weights='IMAGENET1K_V1')
-        # Extract 'encoder.layers.encoder_layer_9' (Mid-to-Late Semantic features)
-        # Output is (B, 197, 768) -> (CLS + 14x14 patches)
+        # ViT: Extract layer 9 -> (B, 197, 768)
         self.vit_ext = create_feature_extractor(vit, return_nodes={'encoder.layers.encoder_layer_9': 'feat'})
 
         # Freeze Backbones
         self.resnet_ext.eval()
         self.vit_ext.eval()
-        for p in self.resnet_ext.parameters(): p.requires_grad = False
-        for p in self.vit_ext.parameters(): p.requires_grad = False
+        for param in self.resnet_ext.parameters(): param.requires_grad = False
+        for param in self.vit_ext.parameters(): param.requires_grad = False
 
-        # --- 2. Decoder (The "Reconstructor" Part) ---
-        # Input Channels: 1024 (ResNet) + 768 (ViT) = 1792
-        # Input Spatial: 14x14
-
+        # --- 4. Decoder (Trainable) ---
+        # Input: 1024 (ResNet) + 768 (ViT) = 1792 channels
         self.decoder = nn.Sequential(
-            # 14x14 -> 28x28
-            nn.ConvTranspose2d(1792, 512, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(1792, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
+            nn.ReLU(True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),  # 14 -> 28
 
-            # 28x28 -> 56x56
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
+            nn.ReLU(True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),  # 28 -> 56
 
-            # 56x56 -> 112x112
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
+            nn.ReLU(True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),  # 56 -> 112
 
-            # 112x112 -> 224x224
-            nn.ConvTranspose2d(128, 3, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid()  # Force output to [0, 1]
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),  # 112 -> 224
+
+            nn.Conv2d(64, 3, kernel_size=3, padding=1),
+            nn.Sigmoid()  # Output 0-1
         )
 
-        # Standard ImageNet Normalization Constants
-        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+    def _load_weights(self, model, path, name):
+        print(f"Loading {name} weights from: {path}")
+        try:
+            # Load checkpoint
+            checkpoint = torch.load(path, map_location='cpu')
+
+            # Handle if checkpoint is just state_dict or full dictionary
+            if 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            else:
+                state_dict = checkpoint
+
+            # Handle 'module.' prefix (from DataParallel)
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                name_key = k[7:] if k.startswith('module.') else k
+                new_state_dict[name_key] = v
+
+            # Load with strict=False (ignore head/fc layer mismatches)
+            msg = model.load_state_dict(new_state_dict, strict=False)
+            print(f"  > Loaded successfully. Missing keys (expected for Heads): {len(msg.missing_keys)}")
+
+        except Exception as e:
+            print(f"  > ERROR loading {name}: {e}")
+            print("  > Continuing with ImageNet weights...")
 
     def forward(self, x):
-        """
-        x: [B, 3, 224, 224] in range [0, 1]
-        """
-        # 1. Normalize inputs for the backbones
-        x_norm = (x - self.mean) / self.std
+        # 1. Normalize (assuming x is 0-1)
+        # Standard ImageNet Mean/Std
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
+        x_norm = (x - mean) / std
 
         # 2. Extract Features
         with torch.no_grad():
-            # ResNet Features: [B, 1024, 14, 14]
             r_feat = self.resnet_ext(x_norm)['feat']
-
-            # ViT Features: [B, 197, 768]
             v_out = self.vit_ext(x_norm)['feat']
 
-            # Reshape ViT: Drop CLS token, reshape patches to spatial grid
-            # [B, 197, 768] -> [B, 196, 768]
-            v_patches = v_out[:, 1:, :]
+            # Reshape ViT patches
+            v_patches = v_out[:, 1:, :]  # Drop CLS
             B, N, C = v_patches.shape
-            H_grid = int(N ** 0.5)  # Should be 14
-
-            # [B, 196, 768] -> [B, 768, 196] -> [B, 768, 14, 14]
+            H_grid = int(N ** 0.5)
             v_feat = v_patches.transpose(1, 2).reshape(B, C, H_grid, H_grid)
 
-            # Concatenate Features
             combined_feat = torch.cat([r_feat, v_feat], dim=1)
 
         # 3. Decode
-        recon = self.decoder(combined_feat)
-        return recon
+        return self.decoder(combined_feat)
 
 
 def get_reconstruction_error(ae_model, img_tensor):
-    """
-    Computes pixel-wise reconstruction error.
-    Args:
-        ae_model: ClassifierAwareAE model.
-        img_tensor: Input image tensor [B, 3, H, W] in range [0, 1].
-    """
-    # Ensure input is safely [0, 1]
-    img_input = torch.clamp(img_tensor, 0, 1)
-
-    # Forward pass (AE handles normalization internally)
-    with torch.no_grad():
-        recon = ae_model(img_input)
-
-    # Squared Error per pixel, averaged over channels
-    # Output shape: (B, 1, H, W)
-    error = (img_input - recon) ** 2
-    error_map = error.mean(dim=1, keepdim=True)
-
+    """Computes pixel-wise reconstruction error map."""
+    recon = ae_model(img_tensor)
+    # L2 distance squared per pixel
+    diff = (recon - img_tensor) ** 2
+    # Sum over channels -> (B, H, W)
+    error_map = diff.sum(dim=1)
     return error_map

@@ -1,0 +1,25 @@
+dataset:
+  name: "cub"
+  num_classes: 200
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  image_size: [224, 224]
+
+models:
+  use_torchvision: False
+  # Paths to the models you just trained in Step B
+  resnet_ckpt: "ln_dataset/assets/cub_models/resnet50_cars.pth"
+  densenet_ckpt: "ln_dataset/assets/cub_models/densenet121_cars.pth"
+  convnext_ckpt: "ln_dataset/assets/cub_models/convnext_t_cars.pth"
+  vit_ckpt: "ln_dataset/assets/cub_models/vit_b_16_cars.pth"
+  swin_ckpt: "ln_dataset/assets/cub_models/swin_t_cars.pth"
+
+paths:
+  # Paths for generation (Step 3 in your pipeline)
+  train_data: "data/images_largescale/cub-200/images"
+  train_list: "data/benchmark_imglist/cub-200/train_cub.txt"
+  val_data: "data/images_largescale/cub-200/images"
+  val_list: "data/benchmark_imglist/cub-200/val_cub.txt"
+  out_dir: "data/images_largescale/cub_ln"
+  # Path to the AE you just trained in Step C
+  ae_weights: "ln_dataset/assets/cub_ae/ae_classifier_aware_weights.pth"

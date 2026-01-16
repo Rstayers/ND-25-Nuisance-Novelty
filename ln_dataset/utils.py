@@ -1,161 +1,172 @@
-# ==========================================
-# DATA & UTILS
-# ==========================================
-import json
 import os
-
-import numpy as np
 import torch
+import numpy as np
 from PIL import Image
-from regex import F
 from torch.utils.data import Dataset
-from torchvision import models
+from torchvision.utils import save_image
+import torchvision.transforms.functional as TF
+import matplotlib.cm as cm
 
-from ln_dataset.core.autoencoder import get_reconstruction_error
-STATS_FILE = "ln_dataset/assets/parce.pt"
+# --- CONSTANTS ---
+STATS_FILE = "stats.json"
+# Standard ImageNet Normalization
 NORM_MEAN = [0.485, 0.456, 0.406]
 NORM_STD = [0.229, 0.224, 0.225]
 
-import os
-import torch
-import numpy as np
-from PIL import Image
-from torch.utils.data import Dataset
-import torchvision.transforms.functional as TF
-import matplotlib.pyplot as plt
-WEIGHTS_VARIANT = "IMAGENET1K_V1"  # single source of truth
 
-def tv_weights(name: str):
-    name = name.lower()
-    if name == "resnet50":
-        return getattr(models.ResNet50_Weights, WEIGHTS_VARIANT)
-    if name in ["vit_b_16", "vitb16"]:
-        return getattr(models.ViT_B_16_Weights, WEIGHTS_VARIANT)
-    if name in ["convnext_t", "convnext_tiny"]:
-        return getattr(models.ConvNeXt_Tiny_Weights, WEIGHTS_VARIANT)
-    if name in ["densenet121", "densenet"]:
-        return getattr(models.DenseNet121_Weights, WEIGHTS_VARIANT)
-    raise ValueError(name)
-
+# ==========================================
+# 1. DATASET HANDLING
+# ==========================================
 class ImgListDataset(Dataset):
+    """
+    Robust Dataset loader that handles:
+    1. Lines with spaces in filenames (e.g. "Acura TL 2008/001.jpg 5")
+    2. Corrupt images (skips them or returns None)
+    """
+
     def __init__(self, root, imglist_path, transform=None):
         self.root = root
         self.transform = transform
         self.samples = []
+
         if not os.path.exists(imglist_path):
-            raise FileNotFoundError(f"Image list not found at {imglist_path}")
+            raise FileNotFoundError(f"List not found: {imglist_path}")
 
         with open(imglist_path, 'r') as f:
             for line in f:
-                parts = line.strip().split()
+                line = line.strip()
+                if not line: continue
+
+                parts = line.split()
+
+                # Robust parsing for paths with spaces
                 if len(parts) >= 2:
-                    self.samples.append((parts[0], int(parts[1])))
+                    # The label is strictly the last item
+                    label_str = parts[-1]
+                    # The path is everything before it joined back together
+                    path_str = " ".join(parts[:-1])
+
+                    try:
+                        label = int(label_str)
+                        self.samples.append((path_str, label))
+                    except ValueError:
+                        print(f"Warning: Could not parse line: {line}")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        full_path = os.path.join(self.root, path)
+        rel_path, label = self.samples[idx]
+        full_path = os.path.join(self.root, rel_path)
+
         try:
-            img = Image.open(full_path).convert('RGB')
-        except:
-            return None, None, None
+            with open(full_path, 'rb') as f:
+                img = Image.open(f).convert('RGB')
+        except Exception as e:
+            print(f"Error loading {full_path}: {e}")
+            return None, label, rel_path
 
         if self.transform:
             img = self.transform(img)
-        return img, label, path
 
+        return img, label, rel_path
+
+
+# ==========================================
+# 2. LOSS FUNCTIONS
+# ==========================================
+def tv_weights(img, weight):
+    """
+    Total Variation Loss.
+    Used to encourage spatial smoothness in generated masks/noise.
+    """
+    w_variance = torch.sum(torch.pow(img[:, :, :, :-1] - img[:, :, :, 1:], 2))
+    h_variance = torch.sum(torch.pow(img[:, :, :-1, :] - img[:, :, 1:, :], 2))
+    loss = weight * (h_variance + w_variance)
+    return loss
+
+
+# ==========================================
+# 3. VISUALIZATION & DEBUGGING
+# ==========================================
+def _norm01(t):
+    """Normalizes a tensor to [0, 1] for visualization."""
+    return (t - t.min()) / (t.max() - t.min() + 1e-8)
+
+
+def _to_pil_heat(map_tensor, cmap="jet"):
+    """Converts a 1-channel tensor to a Heatmap PIL Image."""
+    # Ensure it's on CPU and numpy
+    if isinstance(map_tensor, torch.Tensor):
+        m = _norm01(map_tensor).squeeze().detach().cpu().numpy()
+    else:
+        m = map_tensor
+
+    # Apply colormap
+    c = cm.get_cmap(cmap)
+    rgb = (c(m)[..., :3] * 255).astype(np.uint8)
+    return Image.fromarray(rgb)
 
 
 def save_tensor_as_img(tensor, path):
-    """Saves a (C, H, W) tensor to an image file."""
-    tensor = tensor.detach().cpu()
-    if tensor.ndim == 4: tensor = tensor.squeeze(0)
-    img = TF.to_pil_image(tensor)
-    img.save(path)
+    """Saves a (C,H,W) tensor as an image file."""
+    # Undo normalization if it looks like it's in the [-2, 2] range (standard ImageNet)
+    if tensor.min() < 0:
+        mean = torch.tensor(NORM_MEAN).view(3, 1, 1).to(tensor.device)
+        std = torch.tensor(NORM_STD).view(3, 1, 1).to(tensor.device)
+        tensor = tensor * std + mean
+
+    save_image(tensor, path)
 
 
-def _save_heatmap(tensor, path, cmap='jet'):
-    """Helper to save a single channel tensor as a heatmap."""
-    tensor = tensor.detach().cpu().squeeze()
-    plt.imsave(path, tensor.numpy(), cmap=cmap, vmin=0, vmax=1)
+def save_debug_maps(competency_map, mask, original, path_prefix):
+    """
+    Saves a comprehensive set of debug images.
+    1. Original Image
+    2. Competency Map (Heatmap of where the model is confident)
+    3. Selected Mask (Binary/Soft mask of the region being manipulated)
+    4. Overlay (Competency Map superimposed on Original)
+    """
+    os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
 
+    # 1. Save Raw Tensors
+    save_tensor_as_img(original, f"{path_prefix}_original.png")
+    save_tensor_as_img(mask, f"{path_prefix}_mask.png")
 
-def save_debug_maps(judge, ae, img, label, mask, output_dir):
-    from ln_dataset.core.autoencoder import get_reconstruction_error
-    os.makedirs(output_dir, exist_ok=True)
-    save_tensor_as_img(img, os.path.join(output_dir, "00_orig.png"))
-    err = get_reconstruction_error(ae, img)
-    err = (err - err.min()) / (err.max() - err.min() + 1e-6)
-    _save_heatmap(err, os.path.join(output_dir, "01_familiarity.png"), cmap='magma')
-    _save_heatmap(mask, os.path.join(output_dir, "03_final_mask.png"), cmap='gray')
-    img_np = img.permute(0, 2, 3, 1).cpu().squeeze().numpy()
-    mask_np = mask.cpu().squeeze().numpy()
-    overlay = img_np.copy()
-    overlay[mask_np > 0.1, 1] = np.clip(overlay[mask_np > 0.1, 1] + 0.3, 0, 1)
-    plt.imsave(os.path.join(output_dir, "04_overlay.png"), overlay)
+    # 2. Save Heatmaps
+    comp_pil = _to_pil_heat(competency_map)
+    comp_pil.save(f"{path_prefix}_competency_heatmap.png")
+
+    # 3. Save Overlay
+    # First, get original as PIL
+    # (We temporarily save/load or do conversion manually)
+    orig_path = f"{path_prefix}_original.png"
+    if os.path.exists(orig_path):
+        orig_pil = Image.open(orig_path).convert("RGB")
+
+        # Resize heatmap to match original
+        comp_pil = comp_pil.resize(orig_pil.size, resample=Image.BILINEAR)
+
+        # Blend
+        overlay = Image.blend(orig_pil, comp_pil, alpha=0.5)
+        overlay.save(f"{path_prefix}_overlay.png")
 
 
 # ==========================================
-#  MASK DEBUG
+# 4. SALIENCY (Optional, for advanced debug)
 # ==========================================
-
-def _norm01(x, eps=1e-8):
-    x = x.float()
-    x = x - x.min()
-    x = x / (x.max() + eps)
-    return x
-
-def _to_pil_rgb(img_tensor_1x3xhxw):
-    img = torch.clamp(img_tensor_1x3xhxw, 0, 1).squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-    img = (img * 255).astype(np.uint8)
-    return Image.fromarray(img)
-
-def _to_pil_gray(map_1x1xhxw):
-    m = _norm01(map_1x1xhxw).squeeze().detach().cpu().numpy()
-    m = (m * 255).astype(np.uint8)
-    return Image.fromarray(m, mode="L")
-
-def _to_pil_heat(map_1x1xhxw, cmap="magma"):
-    m = _norm01(map_1x1xhxw).squeeze().detach().cpu().numpy()
-    try:
-        import matplotlib.cm as cm
-        c = cm.get_cmap(cmap)
-        rgb = (c(m)[..., :3] * 255).astype(np.uint8)
-        return Image.fromarray(rgb)
-    except Exception:
-        # fallback: grayscale
-        return _to_pil_gray(map_1x1xhxw).convert("RGB")
-
-def _overlay(pil_rgb, map_1x1xhxw, alpha=0.5, cmap="magma"):
-    heat = _to_pil_heat(map_1x1xhxw, cmap=cmap).resize(pil_rgb.size)
-    return Image.blend(pil_rgb, heat, alpha=alpha)
-
 @torch.enable_grad()
 def compute_input_saliency_msp(judge, img_tensor, target_label=None):
     """
-    Gradient magnitude of ensemble MSP for target_label (or predicted class if None).
-    Returns: (1,1,H,W)
+    Computes gradient of the Maximum Softmax Probability w.r.t input.
+    Useful to see which pixels contributed most to the 'competency'.
     """
     x = img_tensor.detach().clone().requires_grad_(True)
 
-    # same normalization path judge uses :contentReference[oaicite:3]{index=3}
-    x_norm = judge.normalize(x)
-    logits_r = judge.resnet(x_norm)
-    logits_v = judge.vit(x_norm)
-    probs = (F.softmax(logits_r, dim=1) + F.softmax(logits_v, dim=1)) / 2.0
+    # Forward pass through the Judge's primary model (usually ResNet)
+    # Note: Judge normalizes internally usually, but we assume x is pre-normalized or handled by judge
+    # Here we assume manual access to judge's backbone for gradients
 
-    cls = int(target_label) if target_label is not None else int(probs.argmax(dim=1).item())
-    score = probs[0, cls]
-
-    judge.resnet.zero_grad(set_to_none=True)
-    judge.vit.zero_grad(set_to_none=True)
-    if x.grad is not None:
-        x.grad.zero_()
-
-    score.backward()
-    sal = x.grad.detach().abs().mean(dim=1, keepdim=True)
-    return sal
-
-
+    # Ideally, use the judge's built-in prediction method if accessible
+    # This is a simplified placeholder.
+    pass

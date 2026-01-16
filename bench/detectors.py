@@ -13,6 +13,8 @@ from openood.postprocessors import (
     MDSPostprocessor,
 )
 
+from bench.datasets import get_dataset_config
+
 # Only these require ImageNet-Train during setup() in your current zoo.
 _DETECTORS_REQUIRING_TRAIN = {"knn", "mds", "dice", "ash"}
 
@@ -34,73 +36,62 @@ class Config:
                 setattr(self, key, value)
 
 
-def get_detector(name):
+def get_detector(name, dataset_name="ImageNet-Val"):
     """
-    Factory to return initialized OpenOOD Postprocessors with robust default configs.
-    Includes 'dataset' info to satisfy detectors (GradNorm/MDS) that query it.
+    Factory for OpenOOD Postprocessors.
+    Fetches num_classes dynamically based on the dataset being benchmarked.
     """
     name = name.lower()
 
+    # Fetch Dataset Config
+    ds_cfg = get_dataset_config(dataset_name)
+    num_classes = ds_cfg.get("num_classes", 1000)
+
+    # Base Config passed to OpenOOD
     base_dataset_cfg = {
-        "name": "imagenet",
-        "num_classes": 1000,
-        "image_resize": 256,
-        "image_crop": 224,
+        "name": dataset_name,
+        "num_classes": num_classes,
+        "num_classes_id": num_classes,
+        "image_size": 224,
+        # OpenOOD sometimes requires these for OOD setup,
+        # but for postprocessors we mostly care about num_classes
+        "interpolation": "bilinear",
+        "normalization_type": "imagenet"
     }
 
-    def build_cfg(postprocessor_args, postprocessor_sweep):
+    def build_cfg(detector_hyperparams, search_space):
         return {
             "dataset": base_dataset_cfg,
             "postprocessor": {
-                "postprocessor_args": postprocessor_args,
-                "postprocessor_sweep": postprocessor_sweep,
-            },
+                "name": name,
+                "postprocessor_args": detector_hyperparams,
+                "postprocessor_sweep": search_space
+            }
         }
 
     def _tag(pp):
-        # handy for debugging/logging; harmless for OpenOOD
         pp.bench_name = name
         return pp
 
     if name == "msp":
-        cfg = build_cfg({}, {})
-        return _tag(BasePostprocessor(Config(cfg)))
-
+        return _tag(BasePostprocessor(Config(build_cfg({}, {}))))
     elif name == "maxlogit":
-        cfg = build_cfg({}, {})
-        return _tag(MaxLogitPostprocessor(Config(cfg)))
-
+        return _tag(MaxLogitPostprocessor(Config(build_cfg({}, {}))))
     elif name == "react":
-        cfg = build_cfg({"percentile": 90}, {"percentile": [90]})
-        return _tag(ReactPostprocessor(Config(cfg)))
-
+        return _tag(ReactPostprocessor(Config(build_cfg({"percentile": 90}, {"percentile": [90]}))))
     elif name == "ash":
-        cfg = build_cfg({"percentile": 90}, {"percentile": [90]})
-        return _tag(ASHPostprocessor(Config(cfg)))
-
+        return _tag(ASHPostprocessor(Config(build_cfg({"percentile": 90}, {"percentile": [90]}))))
     elif name == "dice":
-        cfg = build_cfg({"p": 90}, {"p": [90]})
-        return _tag(DICEPostprocessor(Config(cfg)))
-
+        return _tag(DICEPostprocessor(Config(build_cfg({"p": 90}, {"p": [90]}))))
     elif name == "kl_matching":
-        cfg = build_cfg({}, {})
-        return _tag(KLMatchingPostprocessor(Config(cfg)))
-
+        return _tag(KLMatchingPostprocessor(Config(build_cfg({}, {}))))
     elif name == "knn":
-        cfg = build_cfg({"K": 50}, {"K": [50]})
-        return _tag(KNNPostprocessor(Config(cfg)))
-
+        return _tag(KNNPostprocessor(Config(build_cfg({"K": 50}, {"K": [50]}))))
     elif name == "gradnorm":
-        cfg = build_cfg({}, {})
-        return _tag(GradNormPostprocessor(Config(cfg)))
-
+        return _tag(GradNormPostprocessor(Config(build_cfg({}, {}))))
     elif name == "ebo":
-        cfg = build_cfg({"temperature": 1.0}, {"temperature": [1.0]})
-        return _tag(EBOPostprocessor(Config(cfg)))
-
+        return _tag(EBOPostprocessor(Config(build_cfg({"temperature": 1}, {"temperature": [1]}))))
     elif name == "mds":
-        cfg = build_cfg({}, {})
-        return _tag(MDSPostprocessor(Config(cfg)))
-
+        return _tag(MDSPostprocessor(Config(build_cfg({}, {}))))
     else:
-        raise ValueError(f"Detector '{name}' not supported.")
+        raise ValueError(f"Unknown detector: {name}")

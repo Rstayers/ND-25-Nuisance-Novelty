@@ -1,213 +1,152 @@
+import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision import models
+from bench.datasets import get_dataset_config
 
-# Import specific model classes for isinstance checks
-from torchvision.models.resnet import ResNet
-from torchvision.models.vision_transformer import VisionTransformer
-from torchvision.models.swin_transformer import SwinTransformer
-from torchvision.models.convnext import ConvNeXt
-from torchvision.models.densenet import DenseNet
-from torchvision.models.regnet import RegNet
-from torchvision.models.efficientnet import EfficientNet  # <--- ADD THIS
-WEIGHTS_VARIANT = "IMAGENET1K_V1"  # single source of truth
 
-def tv_weights(name: str):
-    name = name.lower()
-    if name == "resnet50":
-        return getattr(models.ResNet50_Weights, WEIGHTS_VARIANT)
-    if name in ["vit_b_16", "vitb16"]:
-        return getattr(models.ViT_B_16_Weights, WEIGHTS_VARIANT)
-    if name in ["convnext_t", "convnext_tiny"]:
-        return getattr(models.ConvNeXt_Tiny_Weights, WEIGHTS_VARIANT)
-    if name in ["densenet121", "densenet"]:
-        return getattr(models.DenseNet121_Weights, WEIGHTS_VARIANT)
-    raise ValueError(name)
+# --- WRAPPER FOR FEATURE EXTRACTION ---
 class OpenOODWrapper(nn.Module):
     """
-    Universal wrapper to make Torchvision models compatible with OpenOOD Postprocessors.
-    Handles differences in feature extraction (avgpool vs cls token) and head names.
+    Wraps a standard torchvision model to support:
+    logits, features = model(x, return_feature=True)
+
+    It uses a forward hook to capture the input to the final linear layer.
     """
 
     def __init__(self, model):
         super().__init__()
         self.model = model
+        self.feature = None
 
-        # --- 1. SPECIAL CASE: ConvNeXt ---
-        if isinstance(model, ConvNeXt):
-            # ConvNeXt.classifier = Sequential(LayerNorm2d, Flatten, Linear)
-            # We treat the Linear layer as the 'fc' head.
-            # We must treat LayerNorm + Flatten as part of the feature extractor.
-            self.fc = model.classifier[2]  # The Linear Layer (768 -> 1000)
-            self.convnext_norm = model.classifier[0]  # LayerNorm2d
-            self.convnext_flatten = model.classifier[1]  # Flatten
-            self.is_convnext = True
-        else:
-            self.is_convnext = False
-
-            # --- 2. Locate the Linear Layer (fc) ---
-            if hasattr(model, 'fc'):
-                self.fc = model.fc
-            elif hasattr(model, 'heads'):
-                # ViT: self.heads is usually a Sequential containing the Linear layer
-                if isinstance(model.heads, nn.Sequential):
-                    self.fc = model.heads[-1]
-                else:
-                    self.fc = model.heads
-            elif hasattr(model, 'classifier'):
-                # DenseNet, VGG: classifier is often Sequential
-                if isinstance(model.classifier, nn.Sequential):
-                    self.fc = model.classifier[-1]
-                else:
-                    self.fc = model.classifier
-            elif hasattr(model, 'head'):
-                # Swin
-                self.fc = model.head
+        # Identify the final linear layer to hook into
+        if hasattr(model, "fc"):
+            self.last_layer = model.fc
+        elif hasattr(model, "classifier"):
+            if isinstance(model.classifier, nn.Sequential):
+                # ConvNeXt: classifier = [LayerNorm, Flatten, Linear]
+                self.last_layer = model.classifier[2]
             else:
-                raise ValueError(f"Could not find classification head for {type(model)}.")
-
-    def get_fc(self):
-        """
-        Required by GradNorm.
-        Returns weights/bias as NumPy arrays, not Tensors.
-        """
-        w = self.fc.weight.detach().cpu().numpy()
-        if self.fc.bias is not None:
-            b = self.fc.bias.detach().cpu().numpy()
-        else:
-            b = None
-        return w, b
-
-    def get_feature_dim(self):
-        """
-        Returns the input dimension of the final fully connected layer.
-        """
-        return self.fc.in_features
-
-    def get_features(self, x):
-        """
-        Extracts the penultimate feature vector (before the final linear layer).
-        """
-        # --- A. ConvNeXt ---
-        if self.is_convnext:
-            x = self.model.features(x)
-            # CRITICAL FIX: Add the missing Global Average Pooling
-            x = self.model.avgpool(x)
-            x = self.convnext_norm(x)
-            x = self.convnext_flatten(x)
-            return x
-        elif isinstance(self.model, models.RegNet):
-            # RegNet structure: stem -> trunk_output -> avgpool (AdaptiveAvgPool2d) -> flatten -> fc
-            x = self.model.stem(x)
-            x = self.model.trunk_output(x)
-            if hasattr(self.model, "avgpool"):
-                x = self.model.avgpool(x)
-            x = torch.flatten(x, 1)
-            return x
-
-        # --- B. Vision Transformer (ViT) ---
-        if isinstance(self.model, VisionTransformer):
-            # Manual forward pass to stop before heads
-            x = self.model._process_input(x)
-            n = x.shape[0]
-            batch_class_token = self.model.class_token.expand(n, -1, -1)
-            x = torch.cat([batch_class_token, x], dim=1)
-            x = self.model.encoder(x)
-            x = x[:, 0]  # Take CLS token
-            return x
-
-        # --- C. Swin Transformer ---
-        if isinstance(self.model, SwinTransformer):
-            x = self.model.features(x)
-            x = self.model.norm(x)
-            x = self.model.permute(x)
-            x = self.model.avgpool(x)
-            x = self.model.flatten(x)
-            return x
-
-        # --- D. ResNet / DenseNet / Others ---
-        # Try newer torchvision 'forward_features' if available
-        if hasattr(self.model, 'forward_features'):
-            out = self.model.forward_features(x)
-        else:
-            # Manual extraction for older ResNet/DenseNet
-            if isinstance(self.model, ResNet):
-                out = self.model.conv1(x)
-                out = self.model.bn1(out)
-                out = self.model.relu(out)
-                out = self.model.maxpool(out)
-                out = self.model.layer1(out)
-                out = self.model.layer2(out)
-                out = self.model.layer3(out)
-                out = self.model.layer4(out)
-                out = self.model.avgpool(out)
-            elif isinstance(self.model, DenseNet):
-                out = self.model.features(x)
-                out = F.relu(out, inplace=True)
-                out = F.adaptive_avg_pool2d(out, (1, 1))
+                # DenseNet: classifier = Linear
+                self.last_layer = model.classifier
+        elif hasattr(model, "heads"):
+            # ViT: heads = Sequential(head=Linear)
+            if hasattr(model.heads, "head"):
+                self.last_layer = model.heads.head
             else:
-                # Fallback
-                if hasattr(self.model, 'features'):
-                    out = self.model.features(x)
-                    if hasattr(self.model, 'avgpool'):
-                        out = self.model.avgpool(out)
-                else:
-                    raise NotImplementedError(f"Feature extraction not implemented for {type(self.model)}")
+                self.last_layer = model.heads
+        elif hasattr(model, "head"):
+            # Swin: head = Linear
+            self.last_layer = model.head
+        else:
+            # Fallback (might fail for some custom archs)
+            raise ValueError("OpenOODWrapper: Could not find final linear layer (fc/classifier/head).")
 
-        # Flatten 4D outputs (e.g. ResNet) to 2D
-        if out.dim() == 4:
-            out = torch.flatten(out, 1)
+        # Register the hook
+        self.last_layer.register_forward_hook(self._hook)
 
-        # Handle ViT-like outputs if they slipped through logic above
-        if out.dim() == 3:
-            return out[:, 0]
+    def _hook(self, module, input, output):
+        # input is a tuple of (features, ), we want the tensor
+        self.feature = input[0]
 
-        return out
-
-    def forward(self, x, return_feature=False, return_feature_list=False):
-        feature = self.get_features(x)
-        logits = self.fc(feature)
+    def forward(self, x, return_feature=False):
+        # Run standard forward pass (ignoring return_feature arg for the base model)
+        logits = self.model(x)
 
         if return_feature:
-            return logits, feature
-        return logits
-
-    def forward_threshold(self, x, threshold):
-        """Required by ReAct."""
-        feature = self.get_features(x)
-        feature = feature.clip(max=threshold)
-        logits = self.fc(feature)
+            return logits, self.feature
         return logits
 
 
-def load_backbone(name, device):
-    print(f"Loading backbone: {name}...")
-    def _w(enum_path: str, fallback: str = "IMAGENET1K_V1"):
-        try:
-            mod, enum = enum_path.rsplit(".", 1)
-            W = getattr(__import__(mod, fromlist=[enum]), enum)
-            return getattr(W, "DEFAULT", None) or getattr(W, fallback)
-        except Exception:
-            return fallback
-    if name == 'resnet50':
-        base = models.resnet50(weights=tv_weights(name))
-    elif name == 'vit_b_16':
-        base = models.vit_b_16(tv_weights(name))
-    elif name == 'swin_t':
-        base = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
-    elif name == 'convnext_t':
-        base = models.convnext_tiny(tv_weights(name))
-    elif name == 'densenet121':
-        base = models.densenet121(tv_weights(name))
-    elif name == 'regnet_y_8gf':
-        base = models.regnet_y_8gf(weights=models.RegNet_Y_8GF_Weights.IMAGENET1K_V1)
-    elif name == 'efficientnet_v2_s':
-        base = models.efficientnet_v2_s(weights=models.EfficientNet_V2_S_Weights.IMAGENET1K_V1)
+# --- CONFIGURATION ---
+CARS_CHECKPOINTS = {
+    "resnet50": "ln_dataset/assets/cars_models/resnet50_cars.pth",
+    "vit_b_16": "ln_dataset/assets/cars_models/vit_b_16_cars.pth",
+    "densenet121": "ln_dataset/assets/cars_models/densenet121_cars.pth",
+    "convnext_t": "ln_dataset/assets/cars_models/convnext_t_cars.pth",
+    "swin_t": "ln_dataset/assets/cars_models/swin_t_cars.pth",
+}
+
+
+def load_backbone(name, device, dataset_name=None):
+    """
+    Args:
+        name: backbone name (e.g., 'resnet50')
+        device: torch device
+        dataset_name: (str) used to lookup config (num_classes, is_imagenet)
+    """
+    print(f"Loading Backbone: {name} (Dataset: {dataset_name})")
+
+    # 1. Get Config
+    ds_config = get_dataset_config(dataset_name) if dataset_name else {}
+    use_torchvision = ds_config.get("is_imagenet", True)
+    num_classes = ds_config.get("num_classes", 1000)
+
+    model = None
+
+    # 2. Instantiate Base Model
+    if use_torchvision:
+        # --- PATH A: Standard ImageNet (Torchvision Weights) ---
+        if name == "resnet50":
+            model = models.resnet50(weights='IMAGENET1K_V1')
+        elif name == "vit_b_16":
+            model = models.vit_b_16(weights='IMAGENET1K_V1')
+        elif name in ["convnext_t", "convnext_tiny"]:
+            model = models.convnext_tiny(weights='IMAGENET1K_V1')
+        elif name in ["densenet121", "densenet"]:
+            model = models.densenet121(weights='IMAGENET1K_V1')
+        elif name in ["swin_t", "swin"]:
+            model = models.swin_t(weights='IMAGENET1K_V1')
+        else:
+            raise ValueError(f"Unknown backbone: {name}")
+
     else:
-        raise ValueError(f"Backbone {name} not supported.")
+        # --- PATH B: Custom Dataset (Random Init + Checkpoint Load) ---
+        if name == "resnet50":
+            model = models.resnet50(num_classes=num_classes)
+        elif name == "vit_b_16":
+            model = models.vit_b_16(num_classes=num_classes)
+        elif name in ["convnext_t", "convnext_tiny"]:
+            model = models.convnext_tiny(num_classes=num_classes)
+        elif name in ["densenet121", "densenet"]:
+            model = models.densenet121(num_classes=num_classes)
+        elif name in ["swin_t", "swin"]:
+            model = models.swin_t(num_classes=num_classes)
+        else:
+            raise ValueError(f"Unknown backbone: {name}")
 
-    model = OpenOODWrapper(base)
+        # Load Weights
+        ckpt_path = None
+        if dataset_name == "Stanford-Cars":
+            ckpt_path = CARS_CHECKPOINTS.get(name)
+
+        if ckpt_path and os.path.exists(ckpt_path):
+            print(f"  --> Loading Custom Weights: {ckpt_path}")
+            state = torch.load(ckpt_path, map_location='cpu')
+
+            if 'state_dict' in state:
+                state = state['state_dict']
+
+            new_state = {}
+            for k, v in state.items():
+                k = k.replace("module.", "")
+                new_state[k] = v
+
+            try:
+                model.load_state_dict(new_state, strict=True)
+            except RuntimeError as e:
+                print(f"  !! Strict load failed (Retrying strict=False): {e}")
+                model.load_state_dict(new_state, strict=False)
+        else:
+            if not use_torchvision:
+                print(f"  !! WARNING: No checkpoint found for {name} on {dataset_name}. Model has random weights!")
+
     model.to(device)
     model.eval()
-    return model
+
+    # 3. Wrap Model for OpenOOD Compatibility
+    # This wrapper enables `return_feature=True` which your bench script needs
+    wrapped_model = OpenOODWrapper(model)
+    wrapped_model.to(device)
+
+    return wrapped_model

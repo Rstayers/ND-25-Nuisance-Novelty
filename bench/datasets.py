@@ -169,92 +169,99 @@ DATA_ROOT_DEFAULT = "data/images_largescale"
 LIST_ROOT_DEFAULT = "data/benchmark_imglist"
 
 DATASET_ZOO = {
-    # --- YOUR DATASET ---
-    "LN_v2": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v2",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v2.txt",
-        "parser": parse_ln_manifest
+    #-----------Cars---------------
+    "Cars-LN": {
+        "root": f"{DATA_ROOT_DEFAULT}/stanford_cars_ln",
+        "imglist": f"{LIST_ROOT_DEFAULT}/cars/cars_ln.txt",
+        "parser": parse_ln_manifest,
+        "num_classes": 196,
+        "is_imagenet": False
     },
-    "LN_v3": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v3.5",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v3.5.txt",
-        "parser": parse_ln_manifest
+    "Cars-Test": {
+        "root": ".", # Points to where you kept the images
+        "imglist": "data/benchmark_imglist/cars/test_cars.txt",
+        "parser": parse_standard_ood, # Standard parser (path label)
+        "num_classes": 196,
+        "is_imagenet": False
     },
-    "LN_v4": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v4",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v4.txt",
-        "parser": parse_ln_manifest
+    "Cars-Train": {
+        "root": ".",  # Points to where you kept the images
+        "imglist": "data/benchmark_imglist/cars/train_cars.txt",
+        "parser": parse_standard_ood,  # Standard parser (path label)
+        "num_classes": 196,
+        "is_imagenet": False
     },
-    "LN_v5": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v6",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v6.txt",
-        "parser": parse_ln_manifest
+    "Cars-Val": {
+        "root": ".",  # Points to where you kept the images
+        "imglist": "data/benchmark_imglist/cars/val_cars.txt",
+        "parser": parse_standard_ood,  # Standard parser (path label)
+        "num_classes": 196,
+        "is_imagenet": False
     },
+    # -----------Imagenet---------------
     "LN_v6": {
         "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v6",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v6.txt",
-        "parser": parse_ln_manifest
-    },
-    "ImageNet_LN_335": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v6",
-        "imglist":  f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v6.txt",
         "parser": parse_ln_manifest,
+        "num_classes": 1000,
+        "is_imagenet": True
     },
-    "LN_v1": {
-        "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln.txt",
-        "parser": parse_ln_manifest
+    "Imagenet-LN": {
+        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_final",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_final.txt",
+        "parser": parse_ln_manifest,
+        "num_classes": 1000,
+        "is_imagenet": True
     },
-    # --- ID DATASETS ---
-    "ImageNet-Val": {
-        "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/val_imagenet.txt",
-        "parser": parse_standard_ood
-    },
-    # --- SURROGATE FOR OOSA (COSTARR Setup) ---
-    "OpenImage-O-Surrogate": {
-        # This points to the 10k image subset used for validation
-        "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",  # Ensure this list has ~10k images
-        "parser": parse_standard_ood,
-        "num_samples": 10000
-    },
-
-    # --- ID VALIDATION (COSTARR Setup) ---
-    "ImageNetV2-Val": {
-        "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_v2.txt",  # V2 usually has 10k images
-        "parser": parse_standard_ood
-    },
-    "ImageNet-Train": {
-        "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/train_imagenet.txt",
-        "parser": parse_standard_ood
-    },
-    # --- ROBUSTNESS BENCHMARKS ---
     "ImageNet-C": {
         "root": f"{DATA_ROOT_DEFAULT}",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_c.txt",  # Assumes you concat lists
-        "parser": parse_imagenet_c
+        "parser": parse_imagenet_c,
+        "num_classes": 1000,
+        "is_imagenet": True
     },
 
     "CNS": {
         "root": f"{DATA_ROOT_DEFAULT}/cns",
         "imglist": f"{LIST_ROOT_DEFAULT}/cns_bench/cns_bench_all.txt",
-        "parser": parse_cns_benchmark
+        "parser": parse_cns_benchmark,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "ImageNet-Val": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/val_imagenet.txt",
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "ImageNet-Train": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/train_imagenet.txt",
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    # -----------CUB-200---------------
+
+    # -----------OSA---------------
+    "OpenImage-O-Surrogate": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",  # Ensure this list has ~10k images
+        "parser": parse_standard_ood,
+        "num_samples": 10000,
+        "num_classes": 1000,
+        "is_imagenet": True
     },
 
-    # --- OOD BENCHMARKS ---
-    "ImageNet-O": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_o",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_o/test_imagenet_o.txt",
-        "parser": parse_standard_ood
+    "ImageNetV2-Val": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_v2.txt",  # V2 usually has 10k images
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
     },
-    "iNaturalist": {
-        "root": f"{DATA_ROOT_DEFAULT}/inaturalist",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_inaturalist.txt",
-        "parser": parse_standard_ood
-    }
+
 }
 
 

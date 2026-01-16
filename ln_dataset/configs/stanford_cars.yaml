@@ -1,0 +1,30 @@
+dataset:
+  name: "stanford_cars"
+  num_classes: 196
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  image_size: [224, 224]
+
+# Path Configuration: Centralized here
+paths:
+  # Using "." assumes you run from the root where data/ folder is located
+  train_data: "."
+  train_list: "data/benchmark_imglist/cars/train_cars.txt"
+
+  val_data: "."
+  val_list: "data/benchmark_imglist/cars/val_cars.txt"
+
+  out_dir: "data/images_largescale/stanford_cars_ln"
+  ae_weights: "ln_dataset/assets/cars_ae/ae_classifier_aware_weights.pth"
+
+models:
+  use_torchvision: False
+  # The Ensemble
+  resnet_ckpt: "ln_dataset/assets/cars_models/resnet50_cars.pth"
+  vit_ckpt: "ln_dataset/assets/cars_models/vit_b_16_cars.pth"
+  convnext_ckpt: "ln_dataset/assets/cars_models/convnext_t_cars.pth"
+  densenet_ckpt: "ln_dataset/assets/cars_models/densenet121_cars.pth"
+  swin_ckpt: "ln_dataset/assets/cars_models/swin_t_cars.pth"
+
+calibration:
+  target_fracs: [0.2, 0.2, 0.2, 0.2, 0.2]
