@@ -3,27 +3,19 @@ import torch
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision.utils import save_image
 import torchvision.transforms.functional as TF
-import matplotlib.cm as cm
+from torchvision import models
+import matplotlib.pyplot as plt
 
 # --- CONSTANTS ---
 STATS_FILE = "stats.json"
-# Standard ImageNet Normalization
-NORM_MEAN = [0.485, 0.456, 0.406]
-NORM_STD = [0.229, 0.224, 0.225]
+WEIGHTS_VARIANT = "IMAGENET1K_V1"
 
 
 # ==========================================
 # 1. DATASET HANDLING
 # ==========================================
 class ImgListDataset(Dataset):
-    """
-    Robust Dataset loader that handles:
-    1. Lines with spaces in filenames (e.g. "Acura TL 2008/001.jpg 5")
-    2. Corrupt images (skips them or returns None)
-    """
-
     def __init__(self, root, imglist_path, transform=None):
         self.root = root
         self.transform = transform
@@ -36,137 +28,106 @@ class ImgListDataset(Dataset):
             for line in f:
                 line = line.strip()
                 if not line: continue
-
                 parts = line.split()
-
-                # Robust parsing for paths with spaces
-                if len(parts) >= 2:
-                    # The label is strictly the last item
-                    label_str = parts[-1]
-                    # The path is everything before it joined back together
-                    path_str = " ".join(parts[:-1])
-
-                    try:
-                        label = int(label_str)
-                        self.samples.append((path_str, label))
-                    except ValueError:
-                        print(f"Warning: Could not parse line: {line}")
+                if len(parts) < 2: continue
+                path = " ".join(parts[:-1])
+                label = int(parts[-1])
+                self.samples.append((path, label))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        rel_path, label = self.samples[idx]
-        full_path = os.path.join(self.root, rel_path)
-
+        path, label = self.samples[idx]
+        full_path = os.path.join(self.root, path)
         try:
-            with open(full_path, 'rb') as f:
-                img = Image.open(f).convert('RGB')
+            img = Image.open(full_path).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img, label, path
         except Exception as e:
-            print(f"Error loading {full_path}: {e}")
-            return None, label, rel_path
-
-        if self.transform:
-            img = self.transform(img)
-
-        return img, label, rel_path
+            print(f"Error loading {path}: {e}")
+            return None, label, path
 
 
 # ==========================================
-# 2. LOSS FUNCTIONS
+# 2. HELPER FUNCTIONS
 # ==========================================
-def tv_weights(img, weight):
-    """
-    Total Variation Loss.
-    Used to encourage spatial smoothness in generated masks/noise.
-    """
-    w_variance = torch.sum(torch.pow(img[:, :, :, :-1] - img[:, :, :, 1:], 2))
-    h_variance = torch.sum(torch.pow(img[:, :, :-1, :] - img[:, :, 1:, :], 2))
-    loss = weight * (h_variance + w_variance)
-    return loss
-
-
-# ==========================================
-# 3. VISUALIZATION & DEBUGGING
-# ==========================================
-def _norm01(t):
-    """Normalizes a tensor to [0, 1] for visualization."""
-    return (t - t.min()) / (t.max() - t.min() + 1e-8)
-
-
-def _to_pil_heat(map_tensor, cmap="jet"):
-    """Converts a 1-channel tensor to a Heatmap PIL Image."""
-    # Ensure it's on CPU and numpy
-    if isinstance(map_tensor, torch.Tensor):
-        m = _norm01(map_tensor).squeeze().detach().cpu().numpy()
-    else:
-        m = map_tensor
-
-    # Apply colormap
-    c = cm.get_cmap(cmap)
-    rgb = (c(m)[..., :3] * 255).astype(np.uint8)
-    return Image.fromarray(rgb)
+def tv_weights(name: str):
+    name = name.lower()
+    if name == "resnet50":
+        return getattr(models.ResNet50_Weights, WEIGHTS_VARIANT)
+    if name in ["vit_b_16", "vitb16"]:
+        return getattr(models.ViT_B_16_Weights, WEIGHTS_VARIANT)
+    if name in ["convnext_t", "convnext_tiny"]:
+        return getattr(models.ConvNeXt_Tiny_Weights, WEIGHTS_VARIANT)
+    if name in ["densenet121", "densenet"]:
+        return getattr(models.DenseNet121_Weights, WEIGHTS_VARIANT)
+    raise ValueError(name)
 
 
 def save_tensor_as_img(tensor, path):
-    """Saves a (C,H,W) tensor as an image file."""
-    # Undo normalization if it looks like it's in the [-2, 2] range (standard ImageNet)
-    if tensor.min() < 0:
-        mean = torch.tensor(NORM_MEAN).view(3, 1, 1).to(tensor.device)
-        std = torch.tensor(NORM_STD).view(3, 1, 1).to(tensor.device)
-        tensor = tensor * std + mean
-
-    save_image(tensor, path)
-
-
-def save_debug_maps(competency_map, mask, original, path_prefix):
     """
-    Saves a comprehensive set of debug images.
-    1. Original Image
-    2. Competency Map (Heatmap of where the model is confident)
-    3. Selected Mask (Binary/Soft mask of the region being manipulated)
-    4. Overlay (Competency Map superimposed on Original)
+    Saves a (C, H, W) tensor to an image file.
+    Assumes tensor is [0, 1] (no extra denormalization applied).
     """
-    os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
+    tensor = tensor.detach().cpu()
+    if tensor.ndim == 4:
+        tensor = tensor.squeeze(0)
+    # Clamp to ensure valid range before saving
+    tensor = torch.clamp(tensor, 0, 1)
+    img = TF.to_pil_image(tensor)
+    img.save(path)
 
-    # 1. Save Raw Tensors
-    save_tensor_as_img(original, f"{path_prefix}_original.png")
-    save_tensor_as_img(mask, f"{path_prefix}_mask.png")
 
-    # 2. Save Heatmaps
-    comp_pil = _to_pil_heat(competency_map)
-    comp_pil.save(f"{path_prefix}_competency_heatmap.png")
-
-    # 3. Save Overlay
-    # First, get original as PIL
-    # (We temporarily save/load or do conversion manually)
-    orig_path = f"{path_prefix}_original.png"
-    if os.path.exists(orig_path):
-        orig_pil = Image.open(orig_path).convert("RGB")
-
-        # Resize heatmap to match original
-        comp_pil = comp_pil.resize(orig_pil.size, resample=Image.BILINEAR)
-
-        # Blend
-        overlay = Image.blend(orig_pil, comp_pil, alpha=0.5)
-        overlay.save(f"{path_prefix}_overlay.png")
+def _save_heatmap(tensor, path, cmap='jet'):
+    """Helper to save a single channel tensor as a heatmap."""
+    tensor = tensor.detach().cpu()
+    while tensor.dim() > 2:
+        tensor = tensor.squeeze(0)
+    # vmin/vmax ensure 0 is Blue/Black and 1 is Red/White
+    plt.imsave(path, tensor.numpy(), cmap=cmap, vmin=0, vmax=1)
 
 
 # ==========================================
-# 4. SALIENCY (Optional, for advanced debug)
+# 3. DEBUG MAPS VISUALIZATION
 # ==========================================
-@torch.enable_grad()
-def compute_input_saliency_msp(judge, img_tensor, target_label=None):
+def save_debug_maps(competency_map, mask, img_tensor, path_prefix):
     """
-    Computes gradient of the Maximum Softmax Probability w.r.t input.
-    Useful to see which pixels contributed most to the 'competency'.
+    Arguments aligned with generate_ln.py call:
+    1. competency_map (Heatmap)
+    2. mask (Binary)
+    3. img_tensor (Original Image)
+    4. path_prefix (Output path base)
     """
-    x = img_tensor.detach().clone().requires_grad_(True)
+    # 1. Save Original
+    # We strip the extension from path_prefix if it was inadvertently added,
+    # though usually path_prefix is "dir/filename_base"
+    save_tensor_as_img(img_tensor, f"{path_prefix}_original.png")
 
-    # Forward pass through the Judge's primary model (usually ResNet)
-    # Note: Judge normalizes internally usually, but we assume x is pre-normalized or handled by judge
-    # Here we assume manual access to judge's backbone for gradients
+    # 2. Save Competency Heatmap (Magma style from reference)
+    # Used for familiarity/competency visualization
+    _save_heatmap(competency_map, f"{path_prefix}_competency_heatmap.png", cmap='magma')
 
-    # Ideally, use the judge's built-in prediction method if accessible
-    # This is a simplified placeholder.
-    pass
+    # 3. Save Binary Mask
+    _save_heatmap(mask, f"{path_prefix}_mask.png", cmap='gray')
+
+    # 4. Save Overlay (Green Tint Logic)
+    # Prepare Image (H, W, 3) numpy
+    img_np = img_tensor.detach().cpu()
+    if img_np.ndim == 4: img_np = img_np.squeeze(0)
+    img_np = img_np.permute(1, 2, 0).numpy()  # (C,H,W) -> (H,W,C)
+    img_np = np.clip(img_np, 0, 1)  # Ensure 0-1
+
+    # Prepare Mask (H, W) numpy
+    mask_np = mask.detach().cpu().squeeze().numpy()
+
+    # Create Overlay
+    overlay = img_np.copy()
+    # Apply green tint to masked regions [Channel 1 is Green]
+    # Logic: pixels where mask > 0.1 get +0.3 brightness in Green channel
+    overlay[mask_np > 0.1, 1] = np.clip(overlay[mask_np > 0.1, 1] + 0.3, 0, 1)
+
+    plt.imsave(f"{path_prefix}_overlay.png", overlay)
+
+

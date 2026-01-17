@@ -1,6 +1,5 @@
 import math
-from ln_dataset.utils import ImgListDataset, STATS_FILE, NORM_MEAN, NORM_STD, save_debug_maps, save_tensor_as_img, \
-    tv_weights
+from ln_dataset.utils import save_debug_maps
 import argparse
 import json
 import os
@@ -121,22 +120,7 @@ def load_bin_edges_json(path: str) -> dict:
 def normal_cdf(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
-def load_tv_model(name: str, device: torch.device):
-    name = name.strip().lower()
-    # Prefer enum weights if available; fallback to string for older torchvision.
 
-
-    if name in ["resnet50", "rn50"]:
-        m = models.resnet50(weights=tv_weights(name))
-    elif name in ["vit_b_16", "vitb16", "vit"]:
-        m = models.vit_b_16(weights=tv_weights(name))
-    elif name in ["convnext_t", "convnext_tiny", "cnext_tiny"]:
-        m = models.convnext_tiny(weights=tv_weights(name))
-    elif name in ["densenet121", "densenet"]:
-        m = models.densenet121(weights=tv_weights(name))
-    else:
-        raise ValueError(f"Unknown model name: {name}")
-    return m.to(device).eval()
 # ==========================================
 # 2. CONFIDENCE (PaRCE) JUDGE
 # ==========================================
@@ -362,12 +346,13 @@ def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_d
     mask = select_adaptive_mask(judge, ae_model, img, label)
 
     # --- ADDED DEBUG BLOCK ---
-    if debug_dir and mask is not None:
-        with torch.no_grad():
-            comp_map = get_reconstruction_error(ae_model, img)
-        save_path_prefix = os.path.join(debug_dir, "viz_mask_selection")
-        # Call with correct 4 arguments
-        save_debug_maps(comp_map, mask, img, save_path_prefix)
+    if debug_dir:
+        # Generate reconstruction error map for visualization
+        err = get_reconstruction_error(ae_model, img)
+        err = (err - err.min()) / (err.max() - err.min() + 1e-6)
+
+
+        save_debug_maps(err, mask, img, os.path.join(debug_dir, "viz_mask_selection"))
     # -------------------------
 
     # 2) Nuisances (No Sticker)
@@ -532,8 +517,8 @@ def main():
             stats.total_source_images += 1
             continue
 
-        debug_dir = "debug"
-        if debug_maps and i < args.debug_max:
+        debug_dir = None
+        if args.debug_max > 0 and i < args.debug_max:
             debug_dir = os.path.join(args.out_dir, "debug", f"{i:05d}_{base_name}")
             os.makedirs(debug_dir, exist_ok=True)
             save_tensor_as_img(img, os.path.join(debug_dir, "original.png"))
