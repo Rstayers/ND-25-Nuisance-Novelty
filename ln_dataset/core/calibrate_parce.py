@@ -5,9 +5,9 @@ import torch
 from tqdm import tqdm
 from torchvision import transforms, models
 
-from ln_dataset.configs import load_config
-from ln_dataset.utils import ImgListDataset
-from ln_dataset.core.autoencoder import ClassifierAwareAE
+from ln_dataset.core.configs import load_config
+from ln_dataset.core.utils import ImgListDataset
+from ln_dataset.core.autoencoder import StandardAE
 
 
 def normal_cdf(x: torch.Tensor) -> torch.Tensor:
@@ -87,7 +87,7 @@ def main():
     print(f"Calibrating PaRCE (overall) for {cfg.name} with C={C}")
 
     # AE
-    ae = ClassifierAwareAE().to(device).eval()
+    ae = StandardAE().to(device).eval()
     ae.load_state_dict(torch.load(args.ae_weights, map_location=device))
 
     # ensemble

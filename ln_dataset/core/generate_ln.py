@@ -1,5 +1,5 @@
 import math
-from ln_dataset.utils import save_debug_maps
+from ln_dataset.core.utils import save_debug_maps
 import argparse
 import json
 import os
@@ -9,10 +9,9 @@ from torchvision import transforms, models
 from tqdm import tqdm
 
 # Import Core
-# ADDED get_reconstruction_error here so we can generate the map for the debug visualizer
-from ln_dataset.core.autoencoder import ClassifierAwareAE, get_reconstruction_error
-from ln_dataset.core.masks import generate_competency_mask_hybrid
-from ln_dataset.utils import ImgListDataset, save_tensor_as_img
+from ln_dataset.core.autoencoder import StandardAE, get_reconstruction_error
+from ln_dataset.core.masks import generate_reconstruction_mask
+from ln_dataset.core.utils import ImgListDataset, save_tensor_as_img
 
 # Import Nuisances
 from ln_dataset.nuisances.noise import LocalNoiseNuisance
@@ -21,8 +20,8 @@ from ln_dataset.nuisances.spatial import LocalSpatialNuisance
 from ln_dataset.nuisances.photometric import LocalPhotometricNuisance
 
 # Import Config
-from ln_dataset.configs import load_config, DatasetConfig, load_config
-from ln_dataset.nuisances.sticker import LocalStickerNuisance
+from ln_dataset.core.configs import load_config
+
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
@@ -30,9 +29,8 @@ from ln_dataset.nuisances.sticker import LocalStickerNuisance
 # --- CONSTANTS ---
 DEBUG_MAX_IMAGES = 10
 # Default Bins (will be overwritten if json provided)
-BIN_EDGES = {'1': 0.930, '2': 0.908, '3': 0.867, '4': 0.749, '5': 0.500}
+BIN_EDGES = {'1': 1.0, '2': 0.75, '3': 0.5, '4': 0.25, '5': 0.0}
 from collections import defaultdict
-import pandas as pd  # Optional, for pretty printing, otherwise use logic below
 import hashlib, random
 
 def stable_seed(*parts) -> int:
@@ -124,7 +122,7 @@ def normal_cdf(x: torch.Tensor) -> torch.Tensor:
 # ==========================================
 # 2. CONFIDENCE (PaRCE) JUDGE
 # ==========================================
-BIN_EDGES = {}
+
 
 
 class ConfidenceJudge:
@@ -138,7 +136,7 @@ class ConfidenceJudge:
         self.class_stds = cal["class_stds"].to(device).float()  # [C]
         self.parce_eps = float(cal.get("eps", 1e-6))
         # 1. Load AE
-        self.ae = ClassifierAwareAE().to(device)
+        self.ae = StandardAE().to(device)
         state = torch.load(ae_weights_path, map_location=device)
         self.ae.load_state_dict(state)
         self.ae.eval()
@@ -150,8 +148,6 @@ class ConfidenceJudge:
         self.densenet = self._load_backbone("densenet121", config.models.densenet_ckpt)
 
         # 3. Load PaRCE Stats (Legacy pipeline support)
-        # LIT ALIGNMENT: We do NOT use these to standardize anymore.
-        # The score is a probability [0,1].
         if os.path.exists(parce_calib_path):
             _ = torch.load(parce_calib_path, map_location=device)
 
@@ -211,10 +207,6 @@ class ConfidenceJudge:
             c_pred = c_conf.argmax(dim=1).item()
             d_pred = d_conf.argmax(dim=1).item()
 
-            # 4. Strict Disagreement
-            preds = [r_pred, v_pred, c_pred, d_pred]
-            disagree = any(p != target_label for p in preds)
-
             # 5. AE Reconstruction
             # Paper Formula: C = Conf / (1 + lambda * MSE)
             # Conf is [0,1], Denom is >= 1.0, so C is always [0,1].
@@ -229,7 +221,7 @@ class ConfidenceJudge:
             preds = [r_pred, v_pred, c_pred, d_pred]
             disagree = any(p != target_label for p in preds)
 
-            # Eq. (6): p_id_c = 1 - Phi( (l - 2mu_c)/sigma_c - z )
+            # Eq.: p_id_c = 1 - Phi( (l - 2mu_c)/sigma_c - z )
             mu = self.class_means.view(1, -1)  # [1,C]
             sigma = self.class_stds.view(1, -1)  # [1,C]
             l = torch.tensor([[mse]], device=img.device).float()  # [1,1]
@@ -238,7 +230,7 @@ class ConfidenceJudge:
             zvals = (l - 2.0 * mu) / (sigma + self.parce_eps) - z  # [1,C]
             p_id_c = 1.0 - normal_cdf(zvals)  # [1,C]
 
-            # Eq. (7): rho = p_hat * Σ_c p_c * p_id_c
+            # Eq. : rho = p_hat * Σ_c p_c * p_id_c
             sum_term = torch.sum(probs_ens * p_id_c, dim=1).item()
             parce = p_hat * sum_term
 
@@ -248,75 +240,22 @@ class ConfidenceJudge:
 # 3. GENERATION LOGIC
 # ==========================================
 
-def select_adaptive_mask(judge, ae_model, img, label):
+def select_mask(ae_model, img, label, target_area=0.33):
     """
-    Adaptive Mask Selection (v4):
-    Iterates through progressively harder mask configurations.
-    Returns the first mask that achieves 'reject-but-correct' behavior
-    (low confidence, correct label) on a probe nuisance, or the best available.
+    Selects a mask using the simplified Grid Reconstruction method.
+
+    Args:
+        target_area (float): The percentage of the image to mask out (0.0 to 1.0).
+                             Default is 0.33 (33%).
     """
+    # 1. Generate the mask
+    mask = generate_reconstruction_mask(ae_model, img, label, target_area=target_area)
 
-    # Schedule: Increase Area, Decrease Tau (sharpen familiarity), keep Saliency Avoidance low
-    configs = [
-        {'area': 0.10, 'tau': 0.20, 'avoid': 0.05, 'blur': 15, 'contig': True},
-        {'area': 0.15, 'tau': 0.15, 'avoid': 0.05, 'blur': 15, 'contig': True},
-        {'area': 0.20, 'tau': 0.10, 'avoid': 0.03, 'blur': 11, 'contig': True},
-        {'area': 0.25, 'tau': 0.08, 'avoid': 0.00, 'blur': 9, 'contig': False},
-        {'area': 0.30, 'tau': 0.05, 'avoid': 0.00, 'blur': 7, 'contig': False},
-    ]
+    # 2. Check if mask is valid (not empty)
+    if mask is None or mask.sum() == 0:
+        return None
 
-    best_mask = None
-    best_score_impact = 0.0
-
-    # Use Noise as the "Probe" nuisance to test mask efficacy
-    probe_nuisance = LocalNoiseNuisance(severity=1)
-    probe_p = 0.90  # stronger probe than 0.75
-    require_edge = '4'
-
-    for i, cfg in enumerate(configs):
-        # 1. Generate Mask
-        mask = generate_competency_mask_hybrid(
-            ae_model,
-            img,
-            models=[judge.resnet, judge.vit],
-            area=cfg['area'],
-            tau=cfg['tau'],
-            avoid_top_saliency=cfg['avoid'],
-            contiguous=cfg['contig'],  # Enforce contiguous patches
-            blur_k=cfg['blur']
-        )
-
-        # 2. Probe: Apply nuisance and check response
-        img_probe = probe_nuisance.apply(img, mask, manual_param=probe_p)
-        parce, pred, disagree, _ = judge.get_competency(img_probe, target_label=label)
-
-        # 3. Evaluation
-        is_correct = (pred == label) and (not disagree)
-
-        # If we broke the model (flipped label), this mask might be too aggressive,
-        # BUT if it's the first config, we have to keep it.
-        # If we are correct and confidence is low (Level 4/5), this is perfect.
-
-        if is_correct:
-            if parce <= BIN_EDGES[require_edge]:  # Success: Reject-but-correct
-                return mask  # Found an effective mask
-
-            # If correct but confidence is still high, record this as a candidate
-            # and try the next (harder) config.
-            best_mask = mask
-        else:
-            # We flipped the label.
-            # If this was a later config, the previous one was better.
-            # If this is the first config, we'll store it but hope for better?
-            # Actually, if we flip at 0.10, we likely can't do much.
-            if best_mask is None:
-                best_mask = mask  # Better than nothing
-
-            # If we flipped, going harder (next config) is unlikely to help maintain correctness.
-            # We stop here and use the previous best (or this one if it's all we have).
-            break
-
-    return best_mask
+    return mask
 
 
 def _assign_level(parce_score):
@@ -326,7 +265,6 @@ def _assign_level(parce_score):
     if parce_score > BIN_EDGES['3']: return '3'
     if parce_score > BIN_EDGES['4']: return '4'
 
-    # MODIFIED: Anything below Level 4 is now Level 5 (The Hardest)
     # We do NOT reject samples that are harder than the last bin edge.
     return '5'
 
@@ -343,21 +281,15 @@ def _apply_nuisance(nuisance_obj, img, mask, p: float, seed: int):
 
 def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_dir=None):
     # 1) Mask
-    mask = select_adaptive_mask(judge, ae_model, img, label)
+    mask = select_mask(ae_model, img, label)
 
-    # --- ADDED DEBUG BLOCK ---
     if debug_dir:
         # Generate reconstruction error map for visualization
         err = get_reconstruction_error(ae_model, img)
         err = (err - err.min()) / (err.max() - err.min() + 1e-6)
+        save_debug_maps(img, err, mask, os.path.join(debug_dir, "viz_mask_selection"))
 
-
-        save_debug_maps(err, mask, img, os.path.join(debug_dir, "viz_mask_selection"))
-    # -------------------------
-
-    # 2) Nuisances (No Sticker)
-    # We instantiate them here. Note: severity=1 is passed as requested.
-    # Ensure your Nuisance __init__ accepts these args, or remove them if they are defaults.
+    # 2) Nuisances
     nuisances = [
         (LocalNoiseNuisance(), 'noise'),
         (LocalPixelationNuisance(), 'pixelation'),
@@ -376,7 +308,6 @@ def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_d
     trials_by_name = {
         "noise": 2,
         "spatial": 2,
-        # deterministic-ish:
         "pixelation": 1,
         "brightness": 1,
         "contrast": 1,
@@ -446,7 +377,7 @@ def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_d
 
             rel_path = os.path.join(n_name, lvl, fname).replace("\\", "/")
 
-            # UPDATE: Return rich metadata for stats
+            # Return rich metadata for stats
             selected_samples.append({
                 "path": rel_path,
                 "nuisance": n_name,
@@ -499,7 +430,6 @@ def main():
     if debug_maps:
         os.makedirs(os.path.join(args.out_dir, "debug"), exist_ok=True)
 
-    # --- NEW: Initialize manifest list ---
     manifest_lines = []
 
     print(f"Starting Generation (Lite Mode - 0-1 Scores)...")
@@ -526,14 +456,12 @@ def main():
         results = sweep_and_select(judge, judge.ae, img, label, args.out_dir, base_name, debug_dir)
         stats.update(results)
 
-        # --- NEW: Append results to manifest list ---
         for res in results:
-            # res['path'] is the relative path (e.g., "noise/1/image.png")
             manifest_lines.append(f"{res['path']} {label}")
 
     stats.save(args.out_dir)
 
-    # --- NEW: Write the manifest file ---
+    # --- Write the manifest file ---
     manifest_path = os.path.join(args.out_dir, "manifest.txt")
     with open(manifest_path, "w") as f:
         f.write("\n".join(manifest_lines))

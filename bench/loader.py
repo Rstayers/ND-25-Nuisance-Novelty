@@ -1,12 +1,5 @@
 import os
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-from torchvision import transforms
-
-from bench.datasets import get_dataset_config
-
-import os
-import random  # <--- Add import
+import random
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from torchvision import transforms
@@ -56,16 +49,37 @@ class ConfigurableDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-
     def __getitem__(self, idx):
         item = self.samples[idx]
-        full_path = os.path.join(self.root, item['path'])
 
-        try:
-            img = Image.open(full_path).convert('RGB')
-        except:
-            # Silent fallback black image to keep bench running
-            print("black image")
+        # Try multiple path resolution strategies
+        possible_paths = [
+            os.path.join(self.root, item['path']),  # root + relative path
+            item['path'],  # absolute path as-is
+            os.path.join(self.root, os.path.basename(item['path'])),  # root + filename only
+        ]
+
+        img = None
+        for full_path in possible_paths:
+            if os.path.exists(full_path):
+                try:
+                    img = Image.open(full_path).convert('RGB')
+                    break
+                except Exception as e:
+                    continue
+
+        if img is None:
+            # Print debug info for the first few failures only
+            if not hasattr(self, '_error_count'):
+                self._error_count = 0
+            if self._error_count < 5:
+                print(f"[WARNING] Image not found. Tried paths:")
+                for p in possible_paths:
+                    print(f"  - {p} (exists: {os.path.exists(p)})")
+                self._error_count += 1
+            elif self._error_count == 5:
+                print(f"[WARNING] Suppressing further path warnings...")
+                self._error_count += 1
             img = Image.new('RGB', (224, 224))
 
         if self.transform:

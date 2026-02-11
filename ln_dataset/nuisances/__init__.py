@@ -3,4 +3,3 @@ from .photometric import LocalPhotometricNuisance
 from .noise import LocalNoiseNuisance
 from .pixel import LocalPixelationNuisance
 from .spatial import LocalSpatialNuisance
-from .sticker import LocalStickerNuisance

@@ -107,11 +107,15 @@ def parse_imagenet_c(line, root):
     }
 
 
+# bench/datasets.py - FIXED CNS parser
+
 def parse_cns_benchmark(line, root):
     """
     Parses CNS.
     Snippet: painting_style/004_hammerhead/seed_0040_scale_2500.jpg 4
     Structure: nuisance/class/filename (severity in filename)
+
+    FIXED: CNS has no level 0, minimum is level 1
     """
     path, label = split_line_robust(line)
     path_parts = path.replace('\\', '/').split('/')
@@ -120,14 +124,13 @@ def parse_cns_benchmark(line, root):
     nuisance = path_parts[0] if len(path_parts) > 0 else "cns_unknown"
 
     # Extract severity from filename: scale_2500 -> Level 5
-    level = 0
+    level = 1  # FIXED: Default to 1, not 0
     match = re.search(r'scale_(\d+)', path)
     if match:
         raw = int(match.group(1))
-        # Map raw scale (0-3000+) to approximate levels 1-5
-        if raw == 0:
-            level = 0
-        elif raw < 500:
+        # Map raw scale (0-3000+) to levels 1-5
+        # CNS scale values: 0, 500, 1000, 1500, 2000, 2500
+        if raw < 500:
             level = 1
         elif raw < 1000:
             level = 2
@@ -169,10 +172,39 @@ DATA_ROOT_DEFAULT = "data/images_largescale"
 LIST_ROOT_DEFAULT = "data/benchmark_imglist"
 
 DATASET_ZOO = {
+    # -----------Cars---------------
+    "CUB-LN": {
+        "root": f"{DATA_ROOT_DEFAULT}/cub_ln_v2",
+        "imglist": f"{LIST_ROOT_DEFAULT}/cub-200/cub_ln_v2.txt",
+        "parser": parse_ln_manifest,
+        "num_classes": 200,
+        "is_imagenet": False
+    },
+    "CUB-Test": {
+        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",  # Points to where you kept the images
+        "imglist": "data/benchmark_imglist/cub-200/test_cub.txt",
+        "parser": parse_standard_ood,  # Standard parser (path label)
+        "num_classes": 200,
+        "is_imagenet": False
+    },
+    "CUB-Train": {
+        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",  # Points to where you kept the images
+        "imglist": "data/benchmark_imglist/cub-200/train_cub.txt",
+        "parser": parse_standard_ood,  # Standard parser (path label)
+        "num_classes": 200,
+        "is_imagenet": False
+    },
+    "CUB-Val": {
+        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",  # Points to where you kept the images
+        "imglist": "data/benchmark_imglist/cub-200/val_cub.txt",
+        "parser": parse_standard_ood,  # Standard parser (path label)
+        "num_classes": 200,
+        "is_imagenet": False
+    },
     #-----------Cars---------------
     "Cars-LN": {
-        "root": f"{DATA_ROOT_DEFAULT}/stanford_cars_ln",
-        "imglist": f"{LIST_ROOT_DEFAULT}/cars/cars_ln.txt",
+        "root": f"{DATA_ROOT_DEFAULT}/stanford_cars_ln_v2",
+        "imglist": f"{LIST_ROOT_DEFAULT}/cars/cars_ln_v2.txt",
         "parser": parse_ln_manifest,
         "num_classes": 196,
         "is_imagenet": False
@@ -199,16 +231,10 @@ DATASET_ZOO = {
         "is_imagenet": False
     },
     # -----------Imagenet---------------
-    "LN_v6": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_v6",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_v6.txt",
-        "parser": parse_ln_manifest,
-        "num_classes": 1000,
-        "is_imagenet": True
-    },
-    "Imagenet-LN": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_final",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet_ln/imagenet_ln_final.txt",
+
+    "ImageNet-LN": {
+        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_final_v2",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/imagenet_ln.txt",
         "parser": parse_ln_manifest,
         "num_classes": 1000,
         "is_imagenet": True
@@ -261,6 +287,14 @@ DATASET_ZOO = {
         "num_classes": 1000,
         "is_imagenet": True
     },
+    "OpenImage-O-Test": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",
+        "parser": parse_standard_ood,
+        "num_samples": 5000,  # Different subsample than Surrogate
+        "num_classes": 1000,
+        "is_imagenet": True
+    }
 
 }
 

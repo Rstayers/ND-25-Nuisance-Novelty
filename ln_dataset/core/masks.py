@@ -1,128 +1,86 @@
 import torch
-import torch.nn.functional as F
-from ln_dataset.core.autoencoder import get_reconstruction_error
+import numpy as np
+from skimage.segmentation import felzenszwalb
 
 
-def _minmax01(x, eps=1e-6):
-    x = x - x.amin(dim=(-2, -1), keepdim=True)
-    x = x / (x.amax(dim=(-2, -1), keepdim=True) + eps)
-    return x
-
-
-def _quantile_threshold(x, q):
-    flat = x.reshape(-1)
-    k = max(1, min(flat.numel(), int(q * flat.numel())))
-    t, _ = torch.kthvalue(flat, k)
-    return t
-
-
-def _dilate(mask, k=7):
-    pad = k // 2
-    return F.max_pool2d(mask, kernel_size=k, stride=1, padding=pad)
-
-
-def _gaussian_blur(mask, kernel_size=15, sigma=None):
-    if sigma is None:
-        sigma = kernel_size / 3.0
-    x = torch.arange(kernel_size, device=mask.device).float() - kernel_size // 2
-    gauss = torch.exp(-x ** 2 / (2 * sigma ** 2))
-    gauss = gauss / gauss.sum()
-    k_h = gauss.view(1, 1, kernel_size, 1)
-    k_w = gauss.view(1, 1, 1, kernel_size)
-    pad = kernel_size // 2
-    mask = F.conv2d(mask, k_h, padding=(pad, 0))
-    mask = F.conv2d(mask, k_w, padding=(0, pad))
-    return torch.clamp(mask, 0, 1)
-
-
-def _ensemble_probs(models, x_norm):
-    with torch.enable_grad():
-        probs = []
-        for m in models:
-            logits = m(x_norm)
-            probs.append(F.softmax(logits, dim=1))
-        return torch.stack(probs, dim=0).mean(dim=0)
-
-
-def sensitivity_mask_from_models(img, models, mean, std):
-    img_req = img.detach().clone().requires_grad_(True)
-    mean_t = torch.tensor(mean, device=img.device).view(1, 3, 1, 1)
-    std_t = torch.tensor(std, device=img.device).view(1, 3, 1, 1)
-    x_norm = (img_req - mean_t) / std_t
-
-    probs = _ensemble_probs(models, x_norm)
-    pred = probs.argmax(dim=1)
-
-    # [cite_start]RESTORED: Log-probability gradient (matches old dump) [cite: 1]
-    score = torch.log(probs[0, pred] + 1e-12)
-
-    grad = torch.autograd.grad(score, img_req, retain_graph=False, create_graph=False)[0]
-    gmap = grad.abs().mean(dim=1, keepdim=True)
-    return _minmax01(gmap)
-
-
-def generate_competency_mask_hybrid(
+def generate_reconstruction_mask(
         ae_model,
         img_tensor,
-        models,
-        mean=(0.485, 0.456, 0.406),
-        std=(0.229, 0.224, 0.225),
-        area=0.15,
-        tau=0.25,
-        alpha=1.0,
-        beta=1.0,
-        avoid_top_saliency=0.00,
-        contiguous=True,
-        blur_k=15,
+        scale=100,  # Felzenszwalb parameter (matches paper defaults)
+        sigma=0.5,  # Felzenszwalb parameter
+        min_size=50,  # Felzenszwalb parameter
+        target_area=0.33
 ):
     """
-    Hybrid competency mask: (low recon error) × (high confidence sensitivity).
+    Generates a mask using the reconstruction loss method.
+
+    Logic:
+    1. Segment image into regions (Superpixels) using Felzenszwalb.
+    2. For EACH segment:
+       - Mask ONLY that segment (inpainting task).
+       - Reconstruct the image.
+       - Calculate MSE specifically on that segment's pixels.
+    3. Select segments with the highest error.
     """
-    # 1) Familiarity from AE reconstruction error
-    err = get_reconstruction_error(ae_model, img_tensor)
-    err_n = _minmax01(err)
-    fam = torch.exp(-err_n / max(tau, 1e-6))
+    ae_model.eval()
+    B, C, H, W = img_tensor.shape
+    assert B == 1, "Batch size must be 1"
 
-    # 2) Sensitivity from gradients of ensemble confidence
-    sens = sensitivity_mask_from_models(img_tensor, models, mean, std)
+    # 1. Get Segments
+    img_np = img_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()  # [H, W, C]
+    segments = felzenszwalb(img_np, scale=scale, sigma=sigma, min_size=min_size)
 
-    # Optional: avoid the extreme top-saliency pixels
-    if avoid_top_saliency > 0:
-        t = _quantile_threshold(sens, 1.0 - avoid_top_saliency)
-        sens = sens * (sens < t).float()
+    unique_segments = np.unique(segments)
+    segment_scores = []  #
 
-    # 3) Combine
-    score = (fam ** alpha) * (sens ** beta)
-    score = _minmax01(score)
+    # 2. Iterate over segments
+    for seg_id in unique_segments:
+        # Create boolean mask for this segment
+        seg_mask_np = (segments == seg_id)  # [H, W]
 
-    # 4) Select region
-    H, W = score.shape[-2:]
-    target_pixels = int(area * H * W)
+        # Create tensor mask (1.0 where the segment is, 0.0 elsewhere)
+        # Inpainting usually implies filling with constant value or noise.
+        mask_t = torch.from_numpy(seg_mask_np).float().to(img_tensor.device)
+        mask_t = mask_t.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
 
-    if not contiguous:
-        t = _quantile_threshold(score, 1.0 - area)
-        hard = (score >= t).float()
-    else:
-        # [cite_start]RESTORED: Region growing WITH relaxation (matches old dump) [cite: 1]
-        allowed = (score >= _quantile_threshold(score, 0.85)).float()
-        idx = score.view(-1).argmax()
-        seed = torch.zeros_like(score)
-        seed.view(-1)[idx] = 1.0
-        hard = seed * allowed
+        # Prepare Masked Input (Inpaint this segment)
+        # We fill the segment with 0.5 (gray) or 0.0 (black) to hide it
+        masked_input = img_tensor.clone()
+        masked_input = masked_input * (1 - mask_t)  # Remove segment content
 
-        for _ in range(200):
-            if hard.sum().item() >= target_pixels:
-                break
-            grown = _dilate(hard, k=9) * allowed
+        # Reconstruct
+        with torch.no_grad():
+            recon = ae_model(masked_input)
 
-            # RELAXATION STEP
-            if grown.sum().item() == hard.sum().item():
-                allowed = (score >= _quantile_threshold(score, 0.70)).float()
-                grown = _dilate(hard, k=9) * allowed
-                if grown.sum().item() == hard.sum().item():
-                    break
-            hard = grown
+        # 3. Compute Error ONLY on the masked segment
+        # "compute the difference... this difference is the reconstruction loss"
+        diff = (recon - img_tensor) ** 2
 
-    # 5) Smooth edges
-    soft = _gaussian_blur(hard, kernel_size=blur_k)
-    return torch.clamp(soft, 0, 1)
+        # Mean over channels, then sum over the segment pixels
+        diff = diff.mean(dim=1)  # [1, H, W]
+        mse_segment = (diff * mask_t).sum() / mask_t.sum()  # Average error per pixel in segment
+
+        segment_scores.append((seg_id, mse_segment.item(), mask_t.sum().item()))
+
+    # 4. Selection Strategy
+    # Sort segments by Error (Highest first)
+    segment_scores.sort(key=lambda x: x[1], reverse=True)
+
+    final_mask = torch.zeros((H, W), device=img_tensor.device)
+    current_area = 0
+    total_pixels = H * W
+    target_pixels = total_pixels * target_area
+
+    for seg_id, score, num_pix in segment_scores:
+        if current_area >= target_pixels:
+            break
+
+        # Add this segment to the final mask
+        seg_mask_np = (segments == seg_id)
+        mask_t = torch.from_numpy(seg_mask_np).float().to(img_tensor.device)
+        final_mask = torch.max(final_mask, mask_t)
+
+        current_area += num_pix
+
+    # Add channel dim for compatibility [1, 1, H, W]
+    return final_mask.unsqueeze(0).unsqueeze(0)

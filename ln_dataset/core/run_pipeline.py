@@ -2,7 +2,7 @@ import os
 import sys
 import subprocess
 import argparse
-from ln_dataset.configs import load_config
+from ln_dataset.core.configs import load_config
 
 
 def run_command(cmd, step_name):
@@ -13,7 +13,7 @@ def run_command(cmd, step_name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default="ln_dataset/configs/stanford_cars.yaml")
+    parser.add_argument('--config', type=str, required=True)
 
     # CLI overrides
     parser.add_argument('--train_list', type=str, default=None)
@@ -78,7 +78,7 @@ def main():
             "--imglist", train_list,
             "--ae_weights", ae_weights,
             "--save_path", parce_file,
-            "--samples", "5000"
+            "--samples", "20000"
         ]
         run_command(cmd, "1 (Calibrate PaRCE)")
 
@@ -92,12 +92,12 @@ def main():
         cmd = [
             sys.executable, "-m", "ln_dataset.calibrate_bins",
             "--config", args.config,
-            "--data", train_data,  # <--- Now uses correct path
+            "--data", train_data,
             "--imglist", train_list,
             "--ae_weights", ae_weights,
             "--parce_calib", parce_file,
             "--save_json", bins_file,
-            "--samples", "2000"
+            "--samples", "5000"
         ]
         run_command(cmd, "2 (Calibrate Bins)")
 
@@ -109,7 +109,7 @@ def main():
     cmd = [
         sys.executable, "-m", "ln_dataset.generate_ln",
         "--config", args.config,
-        "--data", val_data,  # <--- Now uses correct path
+        "--data", val_data,
         "--imglist", val_list,
         "--ae_weights", ae_weights,
         "--parce_calib", parce_file,
