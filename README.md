@@ -1,18 +1,36 @@
-# Nuisance Novelty
+<h1 align="center">Evaluating Nuisance Novelty to Expose Gaps in<br>Open Set Reliability</h1>
 
-Official implementation for the ECCV 2025 paper: **"Nuisance Novelty: A Stress-Test for Open-Set Recognition Under Local Perturbations"**
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/ECCV-2026-blue.svg" alt="ECCV 2026"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.8+-green.svg" alt="Python 3.8+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/PyTorch-1.10+-orange.svg" alt="PyTorch"></a>
 
-## Overview
+</p>
 
-**Nuisance Novelty** is a failure mode in Open-Set Recognition (OSR) where an in-distribution image is correctly classified by a closed-set classifier but incorrectly flagged as novel/OOD by a post-hoc detector.
+<p align="center">
+  <b>A dataset-agnostic framework for generating Locally Nuisanced (LN) benchmarks<br>that isolate novelty detector failure from classifier failure in Open Set Recognition.</b>
+</p>
 
-Current nuisance benchmarks (ImageNet-C, CNS-Bench) primarily test **closed-set robustness**—the classifier's ability to maintain accuracy under perturbations. We propose a stress-test that evaluates **open-set robustness**—the detector's ability to maintain correct accept/reject decisions when semantic content is preserved.
+<p align="center">
+  <a href="#">[Paper]</a> •
+  <a href="https://www.kaggle.com/datasets/rexstayersuprick/imagenet-ln">Datasets</a> •
+</p>
 
-### Key Contributions
+---
 
-1. **Local Nuisance (LN) Dataset Generation**: A pipeline that creates perturbations targeting classifier-competency regions while preserving semantic information
-2. **Benchmarking Framework**: Evaluation of 11 post-hoc detectors across 5 backbones on multiple datasets
-3. **New Metrics**: NNR (Nuisance Novelty Rate), CNR (Conditional Novelty Rate), and ADR (Accuracy Degradation Rate)
+
+<p align="center"><i>
+<b>Nuisance Novelty</b> arises when a known input is correctly classified but incorrectly rejected as unknown. Our LN framework generates benchmarks that preserve classifier accuracy while exposing detector-specific failures invisible in prior evaluations.
+</i></p>
+
+---
+
+## Abstract
+
+Open Set Recognition (OSR) requires models to correctly classify known samples while rejecting unknowns, typically via a closed set classifier paired with a novelty detector (or post-processor) that accepts or rejects the input. Unfortunately, current robustness benchmarks rely on global corruptions that degrade the classifier and post-processor simultaneously. This combines failure modes and obscures nuisance novelty–a state where the classifier remains accurate, yet the post-processor erroneously rejects the input–a critical failure mode in safety-sensitive domains such as autonomous driving and robotics. In contrast, we argue that OSR reliability analysis must be isolated at the post-processor level. We introduce a framework that generates targeted local perturbations using reconstruction-based competency masks, preserving classification signals while testing post-processor robustness. Evaluating 50 backbone-post-processor configurations across three datasets reveals that robustness to global corruption is orthogonal to local nuisance. Since no single ranking captures these distinct failure axes, we demonstrate that true OSR reliability requires system-level diagnostics to identify hidden vulnerabilities.
+
+---
+
 
 ## Repository Structure
 
