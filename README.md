@@ -59,7 +59,7 @@ See [INSTALL.md](INSTALL.md) for detailed setup instructions.
 
 ```bash
 # Clone repository
-git clone https://github.com/Rstayers/ND-25-Nuisance-Novelty.git
+git clone https://github.com/Rstayers/Local-Nuisance-Evaluation.git
 cd ND-25-Nuisance-Novelty
 
 # Install dependencies
