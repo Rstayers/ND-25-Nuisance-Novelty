@@ -70,12 +70,25 @@ pip install -r requirements.txt
 
 ### 1. Generate LN Dataset
 
+The unified pipeline runs all generation steps from a single config file:
+
 ```bash
-python -m ln_dataset.core.generate_ln \
+python -m ln_dataset.core.run_pipeline --config ln_dataset/configs/imagenet.yaml
+```
+
+This automatically:
+1. Trains the autoencoder (if weights don't exist)
+2. Calibrates PaRCE statistics
+3. Calibrates severity bin edges
+4. Generates the LN dataset
+
+**Optional parameters:**
+```bash
+python -m ln_dataset.core.run_pipeline \
     --config ln_dataset/configs/imagenet.yaml \
-    --data /path/to/imagenet/val \
-    --imglist /path/to/val_imagenet.txt \
-    --out_dir data/images_largescale/imagenet_ln
+    --ae_epochs 50 \
+    --ae_batch_size 32 \
+    --force_recalibrate  # Force re-run all steps
 ```
 
 See [ln_dataset/README.md](ln_dataset/README.md) for full generation pipeline documentation.
@@ -165,30 +178,47 @@ class_b/image101.jpg 1
 ...
 ```
 
-### Step 3: Train Required Components
+### Step 3: Run the Unified Generation Pipeline
+
+The unified pipeline handles all training, calibration, and generation steps automatically:
 
 ```bash
-# 1. Train autoencoder (learns image reconstruction)
+python -m ln_dataset.core.run_pipeline --config ln_dataset/configs/your_dataset.yaml
+```
+
+This will:
+1. **Train autoencoder** (if weights don't exist) - learns image reconstruction
+2. **Calibrate PaRCE** - compute per-class reconstruction error statistics
+3. **Calibrate bin edges** - determine severity level thresholds
+4. **Generate LN dataset** - create perturbed images
+
+**Optional parameters:**
+```bash
+python -m ln_dataset.core.run_pipeline \
+    --config ln_dataset/configs/your_dataset.yaml \
+    --ae_epochs 50 \
+    --ae_batch_size 32 \
+    --parce_samples 20000 \
+    --bins_samples 5000 \
+    --force_recalibrate  # Force re-run all steps even if files exist
+```
+
+**Running individual steps** (if needed):
+```bash
+# Train autoencoder only
 python -m ln_dataset.core.train_ae --config ln_dataset/configs/your_dataset.yaml
 
-# 2. Calibrate PaRCE (per-class reconstruction statistics)
+# Calibrate PaRCE only
 python -m ln_dataset.core.calibrate_parce --config ln_dataset/configs/your_dataset.yaml
 
-# 3. Calibrate bin edges (severity level thresholds)
+# Calibrate bin edges only
 python -m ln_dataset.core.calibrate_bins --config ln_dataset/configs/your_dataset.yaml
+
+# Generate dataset only (requires trained AE and calibration files)
+python -m ln_dataset.core.generate_ln --config ln_dataset/configs/your_dataset.yaml
 ```
 
-### Step 4: Generate LN Dataset
-
-```bash
-python -m ln_dataset.core.generate_ln \
-    --config ln_dataset/configs/your_dataset.yaml \
-    --data /path/to/your_dataset/val \
-    --imglist data/benchmark_imglist/your_dataset/val.txt \
-    --out_dir data/images_largescale/your_dataset_ln
-```
-
-### Step 5: Register Dataset for Benchmarking
+### Step 4: Register Dataset for Benchmarking
 
 Add your dataset to `bench/datasets.py`:
 
@@ -202,7 +232,7 @@ DATASET_ZOO["YourDataset-LN"] = {
 }
 ```
 
-### Step 6: Run Benchmarks
+### Step 5: Run Benchmarks
 
 ```bash
 python -m bench.run_bench \

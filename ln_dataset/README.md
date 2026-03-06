@@ -13,12 +13,27 @@ This module generates Local Nuisance datasets by applying masked perturbations t
 
 ## Quick Start
 
+The unified pipeline runs all steps from a single command:
+
 ```bash
 # Full pipeline (ImageNet example)
 python -m ln_dataset.core.run_pipeline --config ln_dataset/configs/imagenet.yaml
 ```
 
-Or run each step individually:
+**Pipeline options:**
+```bash
+python -m ln_dataset.core.run_pipeline \
+    --config ln_dataset/configs/imagenet.yaml \
+    --ae_epochs 50 \
+    --ae_batch_size 32 \
+    --parce_samples 20000 \
+    --bins_samples 5000 \
+    --force_recalibrate  # Re-run all steps even if files exist
+```
+
+The pipeline automatically skips steps if output files already exist. Use `--force_recalibrate` to re-run all steps.
+
+**Or run each step individually:**
 
 ```bash
 # 1. Train autoencoder
@@ -124,6 +139,7 @@ noise/level_1/n01440764_00000001.JPEG 0 1 0.85 noise
 ```
 ln_dataset/
 ├── core/
+│   ├── run_pipeline.py   # Unified pipeline (runs all steps)
 │   ├── autoencoder.py    # StandardAE model
 │   ├── masks.py          # Felzenszwalb segmentation + error ranking
 │   ├── generate_ln.py    # Main generation logic
