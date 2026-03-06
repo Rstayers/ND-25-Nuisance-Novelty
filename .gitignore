@@ -30,15 +30,8 @@ debug_train/
 paper_output/
 *.part
 
-# Large data files (>50MB)
-data/benchmark_imglist/imagenet/train_imagenet.txt
-data/benchmark_imglist/imagenet/train_imagenet_mos.txt
-data/benchmark_imglist/imagenet200/train_imagenet800.txt
-data/images_classic/
-data/images_largescale/
-data/imgmeta/
-data/imagenet_annotations.csv
-data/imagenet_synsets.txt
+# Data directory (keep local only)
+data/
 analysis/bench_results/
 
 # Archives
@@ -53,6 +46,9 @@ nul
 # Development docs (keep local only)
 claude.md
 CLAUDE.md
+
+# OpenOOD configs (keep local only)
+configs/
 
 # OS files
 .DS_Store
