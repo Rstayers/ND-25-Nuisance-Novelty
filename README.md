@@ -108,22 +108,7 @@ MSP, ODIN, ReAct, ASH, DICE, KNN, MDS, VIM, SHE, EBO, PostMax
 
 ResNet-50, ViT-B/16, Swin-T, DenseNet-121, ConvNeXt-T
 
-## Citation
 
-```bibtex
-@inproceedings{nuisancenovelty2025,
-    title={Nuisance Novelty: A Stress-Test for Open-Set Recognition Under Local Perturbations},
-    author={[Authors]},
-    booktitle={European Conference on Computer Vision (ECCV)},
-    year={2025}
-}
-```
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## References
 
 - Hendrycks, D., & Dietterich, T. (2019). *Benchmarking Neural Network Robustness to Common Corruptions and Perturbations*. ICLR. ([paper](https://arxiv.org/abs/1903.12261))
 - Dünkel, O., et al. (2025). *CNS-Bench: Benchmarking Image Classifier Robustness Under Continuous Nuisance Shifts*. ([paper](https://arxiv.org/abs/2507.17651))
