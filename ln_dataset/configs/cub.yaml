@@ -20,6 +20,8 @@ paths:
   train_list: "data/benchmark_imglist/cub-200/train_cub.txt"
   val_data: "data/images_largescale/cub-200/images"
   val_list: "data/benchmark_imglist/cub-200/val_cub.txt"
-  out_dir: "data/images_largescale/cub_ln"
+  out_dir: "data/images_largescale/cub_ln_v2"
   # Path to the AE you just trained in Step C
-  ae_weights: "ln_dataset/assets/cub_ae/ae_classifier_aware_weights.pth"
+  ae_weights: "ln_dataset/assets/cub_ae/standard_ae.pth"
+calibration:
+  target_fracs: [0.35, 0.25, 0.20, 0.15, 0.05]

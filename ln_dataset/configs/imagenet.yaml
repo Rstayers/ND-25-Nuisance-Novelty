@@ -16,8 +16,8 @@ paths:
   val_data: "data/images_largescale"
   val_list: "data/benchmark_imglist/imagenet/val_imagenet.txt"
 
-  out_dir: "data/images_largescale/imagenet_ln_final"
-  ae_weights: "ln_dataset/assets/imagenet_ae/ae_classifier_aware_weights.pth"
+  out_dir: "data/images_largescale/imagenet_ln_final_v2"
+  ae_weights: "ln_dataset/assets/imagenet_ae/model.pth"
 
 calibration:
-  target_fracs: [0.2, 0.2, 0.2, 0.2, 0.2] # [0.35, 0.25, 0.20, 0.15, 0.05]
+  target_fracs: [0.35, 0.25, 0.20, 0.15, 0.05]

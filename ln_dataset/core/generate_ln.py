@@ -240,16 +240,18 @@ class ConfidenceJudge:
 # 3. GENERATION LOGIC
 # ==========================================
 
-def select_mask(ae_model, img, label, target_area=0.33):
+def select_mask(ae_model, img, target_area=0.33):
     """
     Selects a mask using the simplified Grid Reconstruction method.
 
     Args:
+        ae_model: Autoencoder model for computing reconstruction error.
+        img: Input image tensor.
         target_area (float): The percentage of the image to mask out (0.0 to 1.0).
                              Default is 0.33 (33%).
     """
     # 1. Generate the mask
-    mask = generate_reconstruction_mask(ae_model, img, label, target_area=target_area)
+    mask = generate_reconstruction_mask(ae_model, img, target_area=target_area)
 
     # 2. Check if mask is valid (not empty)
     if mask is None or mask.sum() == 0:
@@ -281,7 +283,7 @@ def _apply_nuisance(nuisance_obj, img, mask, p: float, seed: int):
 
 def sweep_and_select(judge, ae_model, img, label, output_dir, base_name, debug_dir=None):
     # 1) Mask
-    mask = select_mask(ae_model, img, label)
+    mask = select_mask(ae_model, img)
 
     if debug_dir:
         # Generate reconstruction error map for visualization

@@ -107,15 +107,12 @@ def parse_imagenet_c(line, root):
     }
 
 
-# bench/datasets.py - FIXED CNS parser
-
 def parse_cns_benchmark(line, root):
     """
-    Parses CNS.
+    Parses CNS benchmark.
     Snippet: painting_style/004_hammerhead/seed_0040_scale_2500.jpg 4
     Structure: nuisance/class/filename (severity in filename)
-
-    FIXED: CNS has no level 0, minimum is level 1
+    Note: CNS has no level 0, minimum is level 1.
     """
     path, label = split_line_robust(line)
     path_parts = path.replace('\\', '/').split('/')
@@ -124,7 +121,7 @@ def parse_cns_benchmark(line, root):
     nuisance = path_parts[0] if len(path_parts) > 0 else "cns_unknown"
 
     # Extract severity from filename: scale_2500 -> Level 5
-    level = 1  # FIXED: Default to 1, not 0
+    level = 1
     match = re.search(r'scale_(\d+)', path)
     if match:
         raw = int(match.group(1))
@@ -172,68 +169,67 @@ DATA_ROOT_DEFAULT = "data/images_largescale"
 LIST_ROOT_DEFAULT = "data/benchmark_imglist"
 
 DATASET_ZOO = {
-    # -----------Cars---------------
+    # CUB-200
     "CUB-LN": {
-        "root": f"{DATA_ROOT_DEFAULT}/cub_ln_v2",
-        "imglist": f"{LIST_ROOT_DEFAULT}/cub-200/cub_ln_v2.txt",
+        "root": f"{DATA_ROOT_DEFAULT}/cub_ln",
+        "imglist": f"{LIST_ROOT_DEFAULT}/cub-200/cub_ln.txt",
         "parser": parse_ln_manifest,
         "num_classes": 200,
         "is_imagenet": False
     },
     "CUB-Test": {
-        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",  # Points to where you kept the images
+        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",
         "imglist": "data/benchmark_imglist/cub-200/test_cub.txt",
-        "parser": parse_standard_ood,  # Standard parser (path label)
+        "parser": parse_standard_ood,
         "num_classes": 200,
         "is_imagenet": False
     },
     "CUB-Train": {
-        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",  # Points to where you kept the images
+        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",
         "imglist": "data/benchmark_imglist/cub-200/train_cub.txt",
-        "parser": parse_standard_ood,  # Standard parser (path label)
+        "parser": parse_standard_ood,
         "num_classes": 200,
         "is_imagenet": False
     },
     "CUB-Val": {
-        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",  # Points to where you kept the images
+        "root": f"{DATA_ROOT_DEFAULT}/cub-200/images",
         "imglist": "data/benchmark_imglist/cub-200/val_cub.txt",
-        "parser": parse_standard_ood,  # Standard parser (path label)
+        "parser": parse_standard_ood,
         "num_classes": 200,
         "is_imagenet": False
     },
-    #-----------Cars---------------
+    # Stanford Cars
     "Cars-LN": {
-        "root": f"{DATA_ROOT_DEFAULT}/stanford_cars_ln_v2",
-        "imglist": f"{LIST_ROOT_DEFAULT}/cars/cars_ln_v2.txt",
+        "root": f"{DATA_ROOT_DEFAULT}/stanford_cars_ln",
+        "imglist": f"{LIST_ROOT_DEFAULT}/cars/cars_ln.txt",
         "parser": parse_ln_manifest,
         "num_classes": 196,
         "is_imagenet": False
     },
     "Cars-Test": {
-        "root": ".", # Points to where you kept the images
+        "root": ".",
         "imglist": "data/benchmark_imglist/cars/test_cars.txt",
-        "parser": parse_standard_ood, # Standard parser (path label)
+        "parser": parse_standard_ood,
         "num_classes": 196,
         "is_imagenet": False
     },
     "Cars-Train": {
-        "root": ".",  # Points to where you kept the images
+        "root": ".",
         "imglist": "data/benchmark_imglist/cars/train_cars.txt",
-        "parser": parse_standard_ood,  # Standard parser (path label)
+        "parser": parse_standard_ood,
         "num_classes": 196,
         "is_imagenet": False
     },
     "Cars-Val": {
-        "root": ".",  # Points to where you kept the images
+        "root": ".",
         "imglist": "data/benchmark_imglist/cars/val_cars.txt",
-        "parser": parse_standard_ood,  # Standard parser (path label)
+        "parser": parse_standard_ood,
         "num_classes": 196,
         "is_imagenet": False
     },
-    # -----------Imagenet---------------
-
+    # ImageNet
     "ImageNet-LN": {
-        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln_final_v2",
+        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/imagenet_ln.txt",
         "parser": parse_ln_manifest,
         "num_classes": 1000,
@@ -241,7 +237,7 @@ DATASET_ZOO = {
     },
     "ImageNet-C": {
         "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_c.txt",  # Assumes you concat lists
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_c.txt",
         "parser": parse_imagenet_c,
         "num_classes": 1000,
         "is_imagenet": True
@@ -250,6 +246,35 @@ DATASET_ZOO = {
     "CNS": {
         "root": f"{DATA_ROOT_DEFAULT}/cns",
         "imglist": f"{LIST_ROOT_DEFAULT}/cns_bench/cns_bench_all.txt",
+        "parser": parse_cns_benchmark,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    # Balanced 10K datasets (stratified by severity, 2K per level)
+    "ImageNet-Val-10K": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/val_imagenet_10k.txt",
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "ImageNet-LN-10K": {
+        "root": f"{DATA_ROOT_DEFAULT}/imagenet_ln",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/imagenet_ln_10k.txt",
+        "parser": parse_ln_manifest,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "ImageNet-C-10K": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/imagenet_c_10k.txt",
+        "parser": parse_imagenet_c,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "CNS-10K": {
+        "root": f"{DATA_ROOT_DEFAULT}/cns",
+        "imglist": f"{LIST_ROOT_DEFAULT}/cns_bench/cns_10k.txt",
         "parser": parse_cns_benchmark,
         "num_classes": 1000,
         "is_imagenet": True
@@ -268,21 +293,19 @@ DATASET_ZOO = {
         "num_classes": 1000,
         "is_imagenet": True
     },
-    # -----------CUB-200---------------
-
-    # -----------OSA---------------
+    # OOD Calibration/Test
     "OpenImage-O-Surrogate": {
         "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",  # Ensure this list has ~10k images
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",
         "parser": parse_standard_ood,
-        "num_samples": 10000,
+        "num_samples": 10000,  # First 10K (after shuffle with seed=42) for calibration
+        "sample_offset": 0,
         "num_classes": 1000,
         "is_imagenet": True
     },
-
     "ImageNetV2-Val": {
         "root": f"{DATA_ROOT_DEFAULT}",
-        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_v2.txt",  # V2 usually has 10k images
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_imagenet_v2.txt",
         "parser": parse_standard_ood,
         "num_classes": 1000,
         "is_imagenet": True
@@ -291,11 +314,32 @@ DATASET_ZOO = {
         "root": f"{DATA_ROOT_DEFAULT}",
         "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_openimage_o.txt",
         "parser": parse_standard_ood,
-        "num_samples": 5000,  # Different subsample than Surrogate
+        "sample_offset": 10000,  # Skip first 10K (used for calibration), use remaining ~5869
         "num_classes": 1000,
         "is_imagenet": True
-    }
-
+    },
+    # COSTARR OOD Test Datasets
+    "iNaturalist": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_inaturalist.txt",
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "NINCO": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_ninco.txt",
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
+    "Textures": {
+        "root": f"{DATA_ROOT_DEFAULT}",
+        "imglist": f"{LIST_ROOT_DEFAULT}/imagenet/test_textures.txt",
+        "parser": parse_standard_ood,
+        "num_classes": 1000,
+        "is_imagenet": True
+    },
 }
 
 
@@ -303,3 +347,63 @@ def get_dataset_config(name):
     if name not in DATASET_ZOO:
         raise ValueError(f"Dataset '{name}' not found in DATASET_ZOO. Available: {list(DATASET_ZOO.keys())}")
     return DATASET_ZOO[name]
+
+
+# =========================================================
+# 3. AUTO-DOWNLOAD (via OpenOOD)
+# =========================================================
+
+# Mapping from our dataset names to OpenOOD benchmark names
+OPENOOD_DATASET_MAP = {
+    "ImageNet-Val": "imagenet",
+    "ImageNet-Train": "imagenet",
+    "OpenImage-O-Surrogate": "imagenet",
+    "OpenImage-O-Test": "imagenet",
+    "ImageNetV2-Val": "imagenet",
+}
+
+
+def ensure_dataset_exists(name: str) -> bool:
+    """
+    Check if dataset exists locally. If not, attempt to download via OpenOOD.
+    Returns True if dataset is available, False otherwise.
+
+    Note: LN datasets (ImageNet-LN, CUB-LN, Cars-LN) must be generated locally
+    and cannot be auto-downloaded.
+    """
+    if name not in DATASET_ZOO:
+        print(f"[WARN] Unknown dataset: {name}")
+        return False
+
+    config = DATASET_ZOO[name]
+    imglist = config.get('imglist')
+
+    # Check if imglist exists
+    if imglist and os.path.exists(imglist):
+        return True
+
+    # LN datasets cannot be auto-downloaded
+    if "-LN" in name or "CNS" in name:
+        print(f"[INFO] {name} is a nuisance dataset that must be generated locally.")
+        print(f"       Run the ln_dataset generation pipeline first.")
+        return False
+
+    # Try OpenOOD download for standard datasets
+    openood_name = OPENOOD_DATASET_MAP.get(name)
+    if openood_name is None:
+        print(f"[WARN] No OpenOOD mapping for {name}. Please download manually.")
+        return False
+
+    try:
+        print(f"[DOWNLOAD] Attempting to download {name} via OpenOOD...")
+        from openood.utils.download import download_dataset
+        download_dataset(openood_name)
+        print(f"[DOWNLOAD] {name} downloaded successfully.")
+        return True
+    except ImportError:
+        print(f"[WARN] OpenOOD download utils not available. Please install OpenOOD.")
+        return False
+    except Exception as e:
+        print(f"[WARN] Could not auto-download {name}: {e}")
+        print(f"       Please download manually from OpenOOD repository.")
+        return False

@@ -1,0 +1,72 @@
+# ImageNet Benchmark Configuration
+# Run with: python -m bench.run_bench --config bench/configs/imagenet.yaml
+
+# Dataset info
+dataset:
+  name: "imagenet"
+  num_classes: 1000
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  image_size: [224, 224]
+
+# Model weights
+models:
+  use_torchvision: true  # Use ImageNet-1K pretrained from torchvision
+
+# Data paths
+paths:
+  data_root: "data/images_largescale"
+  list_root: "data/benchmark_imglist"
+
+# Benchmark configuration
+benchmark:
+  # Backbones to evaluate
+  backbones:
+    - resnet50
+    - vit_b_16
+    - swin_t
+    - densenet121
+    - convnext_t
+
+  # OOD detectors to evaluate
+  detectors:
+    - costarr
+    - msp
+    - odin
+    - react
+    - dice
+    - knn
+    - mds
+    - vim
+    - she
+    - postmax
+
+  # Datasets (full test, 10K calibration)
+  id_dataset: "ImageNet-Val-10K"
+  train_dataset: "ImageNet-Train"
+  test_datasets:
+    - ImageNet-Val-10K 
+    - ImageNet-LN
+    - CNS
+    - ImageNet-C
+
+  # OOD calibration/test
+  calib_id_dataset: "ImageNetV2-Val"
+  calib_ood_dataset: "OpenImage-O-Surrogate"
+  test_ood_datasets:
+    - NINCO
+    - OpenImage-O-Test
+
+  # Output
+  out_dir: "analysis/bench_results/imagenet_run_02"
+  batch_size: 32
+
+  # Semantic OOD markers (datasets treated as fully OOD)
+  semantic_ood_markers:
+    - openimage
+    - imagenet-o
+    - textures
+    - inat
+    - sun
+    - places
+    - ninco

@@ -14,8 +14,8 @@ paths:
   val_data: "."
   val_list: "data/benchmark_imglist/cars/val_cars.txt"
 
-  out_dir: "data/images_largescale/stanford_cars_ln"
-  ae_weights: "ln_dataset/assets/cars_ae/ae_classifier_aware_weights.pth"
+  out_dir: "data/images_largescale/stanford_cars_ln_v2"
+  ae_weights: "ln_dataset/assets/cars_ae/standard_ae.pth"
 
 models:
   use_torchvision: False
@@ -27,4 +27,4 @@ models:
   swin_ckpt: "ln_dataset/assets/cars_models/swin_t_cars.pth"
 
 calibration:
-  target_fracs: [0.2, 0.2, 0.2, 0.2, 0.2]
+  target_fracs: [0.35, 0.25, 0.20, 0.15, 0.05]

@@ -19,8 +19,6 @@ _BACKBONE_TO_CFG_KEY = {
     "swin_t": "swin_ckpt",
     "densenet121": "densenet_ckpt",
 }
-import torch
-import torch.nn as nn
 
 
 class OpenOODTorchvisionAdapter(nn.Module):
@@ -101,101 +99,6 @@ class OpenOODTorchvisionAdapter(nn.Module):
             handle.remove()
 
         return logits
-
-
-class OpenOODWrapper(nn.Module):
-    """
-    Wraps a standard torchvision model to support the OpenOOD signature:
-    1. forward(x, return_feature=False, return_feature_list=False)
-    2. forward_threshold(x, threshold)  <-- Required by ReAct
-    """
-
-    def __init__(self, model: nn.Module, backbone_name: str):
-        super().__init__()
-        self.model = model
-        self.backbone_name = backbone_name
-        self._captured_feature = None
-
-        # Identify the classification head layer to hook based on architecture
-        self.head_layer = None
-        if backbone_name == "resnet50":
-            self.head_layer = model.fc
-        elif backbone_name == "densenet121":
-            self.head_layer = model.classifier
-        elif backbone_name == "vit_b_16":
-            self.head_layer = model.heads.head
-        elif backbone_name == "swin_t":
-            self.head_layer = model.head
-        elif backbone_name == "convnext_t":
-            # ConvNeXt classifier is a Sequential; the linear layer is at index 2
-            self.head_layer = model.classifier[2]
-
-        if self.head_layer is None:
-            raise ValueError(f"Could not identify head layer for backbone: {backbone_name}")
-
-        # Register a hook to capture the input to the classification head (which is the feature)
-        # This persists for the life of the wrapper
-        self.head_layer.register_forward_hook(self._feature_hook)
-
-    def _feature_hook(self, module, inputs, outputs):
-        # inputs is a tuple of args; the feature tensor is the first arg
-        self._captured_feature = inputs[0]
-
-    def forward(self, x: torch.Tensor, return_feature: bool = False, return_feature_list: bool = False):
-        # Reset captured feature
-        self._captured_feature = None
-
-        # Run standard forward pass (hooks will fire)
-        logits = self.model(x)
-
-        if return_feature or return_feature_list:
-            if self._captured_feature is None:
-                raise RuntimeError("Feature was not captured during forward pass. Check hook registration.")
-
-            # Helper to handle return types
-            feat = self._captured_feature
-
-            if return_feature_list:
-                return logits, [feat]
-            return logits, feat
-
-        return logits
-
-    def forward_threshold(self, x: torch.Tensor, threshold: float):
-        """
-        Performs forward pass with feature clipping (rectification) before the final layer.
-        Required by ReAct detector.
-        """
-
-        # Define a pre-hook that clips the input to the head layer
-        def clip_hook(module, args):
-            # args[0] is the feature tensor entering the head
-            feat = args[0]
-            # Clip (Rectify) the features
-            clipped_feat = torch.clamp(feat, max=threshold)
-            # Return tuple to replace original args
-            return (clipped_feat,) + args[1:]
-
-        # Register the pre-hook temporarily
-        handle = self.head_layer.register_forward_pre_hook(clip_hook)
-
-        try:
-            # Run the standard forward pass.
-            # The hook will intercept the features right before the head, clip them,
-            # and pass the clipped features to the head.
-            logits = self.model(x)
-        finally:
-            # Always remove the hook so subsequent normal forward calls aren't affected
-            handle.remove()
-
-        return logits
-
-    def __getattr__(self, name: str):
-        # Forward attribute access to the underlying model (e.g. model.fc, model.eval)
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.model, name)
 
 
 def _read_yaml(path: str) -> Dict[str, Any]:

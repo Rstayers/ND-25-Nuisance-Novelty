@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from torchvision import transforms
 
-from bench.datasets import get_dataset_config
+from bench.datasets import get_dataset_config, ensure_dataset_exists
 
 
 class ConfigurableDataset(Dataset):
@@ -13,30 +13,36 @@ class ConfigurableDataset(Dataset):
         self.transform = transform
         self.samples = []
 
+        # 0. Ensure dataset exists (auto-download if needed)
+        ensure_dataset_exists(name)
+
         # 1. Fetch Config
         config = get_dataset_config(name)
         self.root = config['root']
         parser_func = config['parser']
 
-        # Check for sample limit
-        num_samples = config.get('num_samples', None)  # <--- New Config Option
-
-        # 2. Parse List
-        if not os.path.exists(config['imglist']):
-            # ... (keep existing fallback logic) ...
-            pass
-
+        num_samples = config.get('num_samples', None)
+        sample_offset = config.get('sample_offset', 0)
         list_path = config['imglist']
 
-        # --- MODIFIED LOADING LOGIC ---
         with open(list_path, 'r') as f:
             lines = f.readlines()
 
         # Deterministic Sampling (Critical for OOSA Threshold Stability)
-        if num_samples is not None and len(lines) > num_samples:
-            print(f"[{name}] Downsampling from {len(lines)} to {num_samples} (Seed=42)...")
+        # First shuffle with fixed seed, then apply offset and limit
+        if num_samples is not None or sample_offset > 0:
             random.seed(42)
-            lines = random.sample(lines, num_samples)
+            random.shuffle(lines)
+
+            # Apply offset (skip first N samples)
+            if sample_offset > 0:
+                print(f"[{name}] Skipping first {sample_offset} samples...")
+                lines = lines[sample_offset:]
+
+            # Apply limit
+            if num_samples is not None and len(lines) > num_samples:
+                print(f"[{name}] Taking {num_samples} samples (from {len(lines)} available)...")
+                lines = lines[:num_samples]
 
         for line in lines:
             if not line.strip(): continue
@@ -44,7 +50,6 @@ class ConfigurableDataset(Dataset):
             if item['nuisance'] == 'clean_ood':
                 item['nuisance'] = name
             self.samples.append(item)
-        # ------------------------------
 
     def __len__(self):
         return len(self.samples)
@@ -85,7 +90,6 @@ class ConfigurableDataset(Dataset):
         if self.transform:
             img = self.transform(img)
 
-        # FIX: OpenOOD expects key 'data', not 'image'
         return {
             'data': img,
             'label': item['label'],

@@ -1,10 +1,7 @@
-# metrics.py
+# bench/metrics.py - Streamlined metrics (OSA/CCR focus)
+
 import numpy as np
 import torch
-import torch
-import bench.OSA as osa_mod  # so we can call OSA.py exactly
-
-
 
 
 def compute_id_threshold(confidences, tpr=0.95):
@@ -38,91 +35,124 @@ def classify_outcomes(is_correct_arr, confidences, threshold):
         "Contained_Misidentification": n_contained_misid,
         "Total": len(confidences),
     }
-def _average_precision(scores: np.ndarray, labels_pos: np.ndarray) -> float:
+
+
+# =========================================================
+# OSCR / AUOSCR Metrics (COSTARR Protocol)
+# =========================================================
+
+def compute_oscr_curve(known_gt, known_pred, known_conf, unknown_conf, num_thresholds=1000):
     """
-    Average precision for binary labels where labels_pos=1 indicates positive class.
-    Scores: higher means more positive.
-    """
-    order = np.argsort(-scores)
-    y = labels_pos[order].astype(np.int32)
+    Compute OSCR (Open-Set Classification Rate) curve.
 
-    n_pos = int(y.sum())
-    if n_pos == 0:
-        return float("nan")
+    OSCR plots Correct Classification Rate (CCR) vs False Positive Rate (FPR):
+    - CCR = correctly classified AND accepted / total knowns
+    - FPR = incorrectly accepted unknowns / total unknowns
 
-    tp = np.cumsum(y)
-    fp = np.cumsum(1 - y)
+    Args:
+        known_gt: Ground truth labels for known samples (numpy array)
+        known_pred: Predictions for known samples (numpy array)
+        known_conf: Confidence scores for known samples (numpy array)
+        unknown_conf: Confidence scores for unknown samples (numpy array)
+        num_thresholds: Number of threshold points to compute
 
-    precision = tp / np.maximum(tp + fp, 1)
-    recall = tp / n_pos
-
-    # AP = sum over each positive example of (delta recall) * precision
-    pos_idx = np.where(y == 1)[0]
-    ap = 0.0
-    prev_recall = 0.0
-    for i in pos_idx:
-        ap += float(recall[i] - prev_recall) * float(precision[i])
-        prev_recall = float(recall[i])
-    return ap
-
-
-def _auroc(scores: np.ndarray, labels_pos: np.ndarray) -> float:
-    """
-    AUROC for binary labels where labels_pos=1 indicates positive class.
-    Scores: higher means more positive.
-    """
-    order = np.argsort(-scores)
-    y = labels_pos[order].astype(np.int32)
-
-    n_pos = int(y.sum())
-    n_neg = int((1 - y).sum())
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-
-    tp = np.cumsum(y)
-    fp = np.cumsum(1 - y)
-
-    tpr = tp / n_pos
-    fpr = fp / n_neg
-
-    # add endpoints
-    tpr = np.concatenate([[0.0], tpr, [1.0]])
-    fpr = np.concatenate([[0.0], fpr, [1.0]])
-    return float(np.trapz(tpr, fpr))
-
-
-def compute_ood_det_metrics(
-    id_scores: np.ndarray,
-    ood_scores: np.ndarray,
-    tpr: float = 0.95
-) -> dict:
-    """
     Returns:
-      AUROC (ID=positive),
-      AUPR_IN (ID=positive),
-      AUPR_OUT (OOD=positive, using -score),
-      FPR@95TPR (threshold chosen on ID scores to accept 95% ID).
+        thresholds: Array of threshold values
+        ccr: Correct Classification Rate at each threshold
+        fpr: False Positive Rate at each threshold
     """
-    id_scores = np.asarray(id_scores).astype(np.float64)
-    ood_scores = np.asarray(ood_scores).astype(np.float64)
+    known_gt = np.asarray(known_gt)
+    known_pred = np.asarray(known_pred)
+    known_conf = np.asarray(known_conf)
+    unknown_conf = np.asarray(unknown_conf)
 
-    scores = np.concatenate([id_scores, ood_scores], axis=0)
-    labels_in = np.concatenate([np.ones_like(id_scores), np.zeros_like(ood_scores)], axis=0)  # ID=1
+    # Get threshold range from combined score distribution
+    all_conf = np.concatenate([known_conf, unknown_conf])
+    thresholds = np.linspace(all_conf.min(), all_conf.max(), num_thresholds)
 
-    auroc = _auroc(scores, labels_in)
-    aupr_in = _average_precision(scores, labels_in)
+    n_known = len(known_gt)
+    n_unknown = len(unknown_conf)
 
-    # AUPR_OUT: OOD positive, invert scores so higher => more OOD
-    labels_out = 1 - labels_in
-    aupr_out = _average_precision(-scores, labels_out)
+    ccr = []
+    fpr = []
 
-    # FPR@95TPR: threshold chosen from ID only
-    thr = compute_id_threshold(id_scores, tpr=tpr)  # your existing function
-    fpr95 = float(np.mean(ood_scores >= thr))
+    # Pre-compute correctness mask
+    correct_mask = (known_pred == known_gt)
+
+    for thresh in thresholds:
+        # CCR: correctly classified AND accepted (above threshold)
+        accepted_known = (known_conf >= thresh)
+        ccr_val = (correct_mask & accepted_known).sum() / n_known if n_known > 0 else 0.0
+        ccr.append(ccr_val)
+
+        # FPR: unknowns incorrectly accepted (above threshold)
+        fpr_val = (unknown_conf >= thresh).sum() / n_unknown if n_unknown > 0 else 0.0
+        fpr.append(fpr_val)
+
+    return np.array(thresholds), np.array(ccr), np.array(fpr)
+
+
+def compute_auoscr(known_gt, known_pred, known_conf, unknown_conf):
+    """
+    Compute Area Under OSCR Curve using trapezoidal integration.
+
+    AUOSCR measures the trade-off between correctly classifying knowns
+    and rejecting unknowns across all thresholds.
+
+    Args:
+        known_gt: Ground truth labels for known samples
+        known_pred: Predictions for known samples
+        known_conf: Confidence scores for known samples
+        unknown_conf: Confidence scores for unknown samples
+
+    Returns:
+        AUOSCR score in [0, 1] (higher is better)
+    """
+    _, ccr, fpr = compute_oscr_curve(known_gt, known_pred, known_conf, unknown_conf)
+
+    # Sort by FPR for proper integration (low to high FPR)
+    sorted_idx = np.argsort(fpr)
+    fpr_sorted = fpr[sorted_idx]
+    ccr_sorted = ccr[sorted_idx]
+
+    # Trapezoidal integration
+    auoscr = np.trapz(ccr_sorted, fpr_sorted)
+
+    return auoscr
+
+
+def compute_ood_detection_metrics(known_conf, unknown_conf):
+    """
+    Compute standard OOD detection metrics: AUROC, FPR@95TPR.
+
+    Convention: Higher confidence = more likely to be known/ID.
+
+    Args:
+        known_conf: Confidence scores for known/ID samples
+        unknown_conf: Confidence scores for unknown/OOD samples
+
+    Returns:
+        Dictionary with AUROC and FPR@95TPR
+    """
+    from sklearn.metrics import roc_auc_score, roc_curve
+
+    known_conf = np.asarray(known_conf)
+    unknown_conf = np.asarray(unknown_conf)
+
+    # Labels: 1 = known (positive), 0 = unknown (negative)
+    labels = np.concatenate([np.ones(len(known_conf)), np.zeros(len(unknown_conf))])
+    scores = np.concatenate([known_conf, unknown_conf])
+
+    # AUROC
+    auroc = roc_auc_score(labels, scores)
+
+    # FPR@95TPR
+    fpr_arr, tpr_arr, _ = roc_curve(labels, scores)
+    # Find FPR where TPR >= 0.95
+    idx = np.searchsorted(tpr_arr, 0.95)
+    fpr_at_95tpr = fpr_arr[min(idx, len(fpr_arr) - 1)]
 
     return {
         "AUROC": auroc,
-        "AUPR_IN": aupr_in,
-        "AUPR_OUT": aupr_out,
-        "FPR@95TPR": fpr95,
+        "FPR@95TPR": fpr_at_95tpr
     }

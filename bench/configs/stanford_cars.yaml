@@ -1,0 +1,65 @@
+# Stanford Cars Benchmark Configuration
+# Run with: python -m bench.run_bench --config bench/configs/stanford_cars.yaml
+
+# Dataset info
+dataset:
+  name: "stanford_cars"
+  num_classes: 196
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  image_size: [224, 224]
+
+# Model weights (fine-tuned required)
+models:
+  use_torchvision: false
+  resnet_ckpt: "bench/assets/cars_models/resnet50_cars.pth"
+  vit_ckpt: "bench/assets/cars_models/vit_b_16_cars.pth"
+  convnext_ckpt: "bench/assets/cars_models/convnext_t_cars.pth"
+  densenet_ckpt: "bench/assets/cars_models/densenet121_cars.pth"
+  swin_ckpt: "bench/assets/cars_models/swin_t_cars.pth"
+
+# Data paths
+paths:
+  data_root: "data/images_largescale"
+  list_root: "data/benchmark_imglist"
+
+# Benchmark configuration
+benchmark:
+  # Backbones to evaluate
+  backbones:
+    - resnet50
+    - vit_b_16
+    - swin_t
+    - densenet121
+    - convnext_t
+
+  # OOD detectors to evaluate
+  detectors:
+    - msp
+    - odin
+    - react
+    - dice
+    - knn
+    - mds
+    - vim
+    - she
+    - postmax
+
+  # Datasets
+  id_dataset: "Cars-Val"
+  train_dataset: "Cars-Train"
+  test_datasets:
+    - Cars-LN
+
+  # OOD calibration/test (use same as ImageNet or define Cars-specific)
+  calib_id_dataset: "Cars-Val"
+  calib_ood_dataset: "OpenImage-O-Surrogate"
+  test_ood_dataset: "OpenImage-O-Test"
+
+  # Output
+  out_dir: "analysis/bench_results/cars"
+  batch_size: 32
+
+  # Semantic OOD markers
+  semantic_ood_markers:
+    - openimage

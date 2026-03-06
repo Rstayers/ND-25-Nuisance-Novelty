@@ -1,13 +1,15 @@
-# bench/detectors.py - FIXED ODIN and other detectors
+# bench/detectors.py - Streamlined detector factory using stock OpenOOD
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Any
 import numpy as np
 import openood.postprocessors.mds_postprocessor as mds_lib
 
 from openood.postprocessors import (
     BasePostprocessor,
+    ODINPostprocessor,
     ReactPostprocessor,
     ASHPostprocessor,
     DICEPostprocessor,
@@ -20,14 +22,171 @@ from openood.postprocessors import (
     VIMPostprocessor,
     SHEPostprocessor
 )
-import torch.nn.functional as F  # <-- FIX THIS LINE
+
+
+class FixedODINPostprocessor(BasePostprocessor):
+    """
+    Fixed ODIN implementation that properly handles gradients.
+
+    ODIN: Out-of-Distribution Detector for Neural Networks
+    Uses temperature scaling and input perturbation.
+    """
+
+    def __init__(self, config):
+        super().__init__(config)
+        # Config objects don't support .get(), use getattr instead
+        args = config.postprocessor.postprocessor_args
+        self.temperature = getattr(args, "temperature", 1000)
+        self.noise = getattr(args, "noise", 0.0014)
+        # ImageNet normalization std for gradient scaling
+        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    def postprocess(self, net, data):
+        """
+        Compute ODIN score with temperature scaling and input perturbation.
+        """
+        device = data.device
+        self.std = self.std.to(device)
+
+        # Enable gradient computation for input perturbation
+        data = data.clone().requires_grad_(True)
+
+        # Forward pass with temperature scaling
+        logits = net(data)
+        logits_scaled = logits / self.temperature
+
+        # Get pseudo-labels (max predictions)
+        pseudo_labels = logits_scaled.argmax(dim=1)
+
+        # Compute cross-entropy loss for perturbation direction
+        loss = F.cross_entropy(logits_scaled, pseudo_labels)
+
+        # Backward pass to get input gradients
+        loss.backward()
+
+        # Compute perturbation: epsilon * sign(gradient), normalized by std
+        gradient = data.grad.data
+        gradient_normalized = gradient / self.std
+        perturbation = self.noise * torch.sign(gradient_normalized)
+
+        # Apply perturbation
+        data_perturbed = data.detach() - perturbation
+
+        # Forward pass on perturbed input
+        with torch.no_grad():
+            logits_perturbed = net(data_perturbed)
+            logits_perturbed_scaled = logits_perturbed / self.temperature
+            softmax_scores = F.softmax(logits_perturbed_scaled, dim=1)
+            conf, pred = torch.max(softmax_scores, dim=1)
+
+        return pred, conf
 
 from bench.datasets import get_dataset_config
 from bench.PostMax import PostMaxPostprocessor
+from bench.COSTARR import COSTARR
+from tqdm import tqdm
 
 _DETECTORS_REQUIRING_TRAIN = {
-    "knn", "mds", "dice", "ash", "vim", "she", "postmax", "react"
+    "knn", "mds", "dice", "ash", "vim", "she", "postmax", "react", "costarr"
 }
+
+
+class COSTARRPostprocessor(BasePostprocessor):
+    """Wrapper for COSTARR detector to match OpenOOD BasePostprocessor API."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.costarr_model = None
+        self.weights = None
+
+    def setup(self, net, id_loader_dict, ood_loader_dict):
+        """Extract features from training data and fit COSTARR model."""
+        # Get classification head weights from network
+        self.weights = self._get_fc_weights(net)
+
+        # Extract (logits, features) from training data
+        train_loader = id_loader_dict.get("train") or id_loader_dict.get("val")
+        logits, features, labels = self._extract_features(net, train_loader)
+
+        # Filter to correctly classified samples
+        preds = logits.argmax(dim=1)
+        correct_mask = (preds == labels)
+
+        print(f"[COSTARR] Using {correct_mask.sum()}/{len(labels)} correctly classified samples for setup")
+
+        # Initialize COSTARR model
+        self.costarr_model = COSTARR(
+            logits[correct_mask],
+            features[correct_mask],
+            self.weights
+        )
+
+    def _get_fc_weights(self, net):
+        """Extract classification head weights from network."""
+        # Try common attribute names for the classification head
+        if hasattr(net, 'fc'):
+            return net.fc.weight.detach().clone()
+        elif hasattr(net, 'head'):
+            if hasattr(net.head, 'weight'):
+                return net.head.weight.detach().clone()
+            elif hasattr(net.head, 'fc'):
+                return net.head.fc.weight.detach().clone()
+        elif hasattr(net, 'classifier'):
+            if isinstance(net.classifier, nn.Linear):
+                return net.classifier.weight.detach().clone()
+            elif isinstance(net.classifier, nn.Sequential):
+                # Get last linear layer
+                for layer in reversed(net.classifier):
+                    if isinstance(layer, nn.Linear):
+                        return layer.weight.detach().clone()
+        elif hasattr(net, 'get_fc'):
+            W, _ = net.get_fc()
+            return torch.from_numpy(W)
+
+        raise ValueError("Could not find classification head weights in network")
+
+    def _extract_features(self, net, loader):
+        """Extract logits, features, and labels from data loader."""
+        net.eval()
+        device = next(net.parameters()).device
+
+        all_logits = []
+        all_features = []
+        all_labels = []
+
+        with torch.no_grad():
+            for batch in tqdm(loader, desc="[COSTARR] Extracting features"):
+                if isinstance(batch, dict):
+                    data = batch['data'].to(device)
+                    labels = batch['label']
+                else:
+                    data, labels = batch
+                    data = data.to(device)
+
+                # Forward pass with features
+                logits, features = net(data, return_feature=True)
+
+                all_logits.append(logits.cpu())
+                all_features.append(features.cpu())
+                all_labels.append(labels if isinstance(labels, torch.Tensor) else torch.tensor(labels))
+
+        return (
+            torch.cat(all_logits, dim=0),
+            torch.cat(all_features, dim=0),
+            torch.cat(all_labels, dim=0)
+        )
+
+    def postprocess(self, net, data):
+        """Compute COSTARR scores."""
+        # Get logits and features
+        logits, features = net(data, return_feature=True)
+
+        # Get COSTARR rescored outputs
+        rescored = self.costarr_model.ReScore(logits.cpu(), features.cpu())
+
+        # Return (prediction, confidence)
+        conf, pred = torch.max(rescored, dim=1)
+        return pred, conf
 
 
 def requires_train_loader(name: str) -> bool:
@@ -44,128 +203,6 @@ class Config:
             else:
                 setattr(self, key, value)
 
-
-# =============================================================================
-# FIXED ODIN - Custom implementation that actually works
-# =============================================================================
-
-class FixedODINPostprocessor(BasePostprocessor):
-    def __init__(self, config):
-        super().__init__(config)
-        args = config.postprocessor.postprocessor_args
-        self.temperature = getattr(args, 'temperature', 1000)
-        self.noise = getattr(args, 'noise', 0.0014)
-
-    @torch.enable_grad()
-    def postprocess(self, net, data):
-        data = data.clone().requires_grad_(True)
-
-        output = net(data)
-
-        # Temperature scaling for gradient computation only
-        output_scaled = output / self.temperature
-        labels = output.argmax(dim=1)
-
-        loss = F.cross_entropy(output_scaled, labels)
-        loss.backward()
-
-        # Gradient perturbation
-        gradient = torch.sign(data.grad.data)
-
-        # Normalize by ImageNet std
-        gradient[:, 0] /= 0.229
-        gradient[:, 1] /= 0.224
-        gradient[:, 2] /= 0.225
-
-        perturbed = data.detach() - self.noise * gradient
-
-        # Final forward WITHOUT temperature scaling
-        with torch.no_grad():
-            output_final = net(perturbed)
-            conf, pred = F.softmax(output_final, dim=1).max(dim=1)
-
-        return pred, conf
-
-
-# =============================================================================
-# FIXED ReAct - Ensure percentile is computed correctly
-# =============================================================================
-
-class FixedReActPostprocessor(BasePostprocessor):
-    """ReAct with proper percentile computation."""
-
-    def __init__(self, config):
-        super().__init__(config)
-        args = config.postprocessor.postprocessor_args
-        self.percentile = getattr(args, 'percentile', 90)
-        self.threshold = None
-
-    def setup(self, net, id_loader_dict, ood_loader_dict):
-        net.eval()
-
-        activation_list = []
-        loader = id_loader_dict.get('val') or id_loader_dict.get('train')
-
-        if loader is None:
-            raise ValueError("ReAct setup requires 'val' or 'train' loader")
-
-        print(f"ReAct setup: computing {self.percentile}th percentile...")
-        with torch.no_grad():
-            for batch in loader:
-                data = batch['data'].cuda()
-                _, features = net(data, return_feature=True)
-                activation_list.append(features.cpu())
-
-        all_activations = torch.cat(activation_list, dim=0)
-        self.threshold = np.percentile(all_activations.numpy(), self.percentile)
-        print(f"ReAct threshold: {self.threshold:.4f}")
-
-    def postprocess(self, net, data):
-        if self.threshold is None:
-            raise RuntimeError("ReAct: setup() must be called before postprocess()")
-
-        with torch.no_grad():
-            logits = net.forward_threshold(data, self.threshold)
-            conf, pred = F.softmax(logits, dim=1).max(dim=1)
-
-        return pred, conf
-
-
-class FixedASHPostprocessor(BasePostprocessor):
-    """ASH with per-sample activation pruning."""
-
-    def __init__(self, config):
-        super().__init__(config)
-        args = config.postprocessor.postprocessor_args
-        self.percentile = getattr(args, 'percentile', 90)
-
-    def setup(self, net, id_loader_dict, ood_loader_dict):
-        pass  # ASH computes threshold per-sample
-
-    def postprocess(self, net, data):
-        with torch.no_grad():
-            logits, features = net(data, return_feature=True)
-
-            # Compute per-sample threshold (percentile along feature dim)
-            features_np = features.cpu().numpy()
-            threshold_np = np.percentile(features_np, self.percentile, axis=1, keepdims=True)
-            threshold = torch.from_numpy(threshold_np).to(device=features.device, dtype=features.dtype)
-
-            # ASH-P: Zero activations below threshold
-            features_ash = features * (features >= threshold).float()
-
-            # Recompute logits with pruned features
-            fc = net.get_fc_layer()
-            logits_ash = fc(features_ash)
-
-            conf, pred = F.softmax(logits_ash, dim=1).max(dim=1)
-
-        return pred, conf
-
-
-# =============================================================================
-# FACTORY
-# =============================================================================
 
 def get_detector(name, dataset_name="ImageNet-Val"):
     """Factory for OpenOOD Postprocessors."""
@@ -209,7 +246,7 @@ def get_detector(name, dataset_name="ImageNet-Val"):
         pp.bench_name = name
         return pp
 
-    # --- Standard detectors ---
+    # --- Standard detectors (stock OpenOOD) ---
     if name == "msp":
         return _tag(BasePostprocessor(Config(build_cfg({}))))
 
@@ -219,19 +256,18 @@ def get_detector(name, dataset_name="ImageNet-Val"):
     elif name == "ebo":
         return _tag(EBOPostprocessor(Config(build_cfg({"temperature": 1}))))
 
-    # --- Fixed detectors ---
     elif name == "odin":
         return _tag(FixedODINPostprocessor(Config(build_cfg({
-            "temperature": 100,  # Lower from 1000
-            "noise": 0.001  # Lower from 0.0014
+            "temperature": 1000,
+            "noise": 0.0014
         }))))
+
     elif name == "react":
-        return _tag(FixedReActPostprocessor(Config(build_cfg({"percentile": 90}))))
+        return _tag(ReactPostprocessor(Config(build_cfg({"percentile": 90}))))
 
     elif name == "ash":
-        return _tag(FixedASHPostprocessor(Config(build_cfg({"percentile": 90}))))
+        return _tag(ASHPostprocessor(Config(build_cfg({"percentile": 90}))))
 
-    # --- Detectors requiring training data ---
     elif name == "dice":
         return _tag(DICEPostprocessor(Config(build_cfg({"p": 90}))))
 
@@ -249,6 +285,9 @@ def get_detector(name, dataset_name="ImageNet-Val"):
 
     elif name == "postmax":
         return _tag(PostMaxPostprocessor(Config(build_cfg({}))))
+
+    elif name == "costarr":
+        return _tag(COSTARRPostprocessor(Config(build_cfg({}))))
 
     else:
         raise ValueError(f"Unknown detector: {name}")

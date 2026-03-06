@@ -100,7 +100,7 @@ def main():
 
         with torch.no_grad():
             try:
-                mask = select_mask(ae, img, label, target_area=0.33)
+                mask = select_mask(ae, img, target_area=0.33)
             except Exception:
                 # If mask generation fails, skip this image
                 continue

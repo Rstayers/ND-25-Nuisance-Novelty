@@ -11,7 +11,6 @@
 #   CSA     = N_correct / N_total                    (closed-set accuracy)
 #   CCR     = Clean_Success / N_total                (correct & accepted rate)
 #   NNR     = Nuisance_Novelty / N_total             (nuisance novelty prevalence)
-#   CNR     = Nuisance_Novelty / N_correct           (conditional novelty rate)
 #   OSA_Gap = CSA - CCR = NNR                        (known-side divergence)
 #   URR     = rejected_unknowns / n_unknown          (unknown rejection rate)
 #   OSA     = (Clean_Success + rejected_unknowns) / (N_total + n_unknown)
@@ -36,18 +35,20 @@ METRIC_LABELS = {
     "CSA": "Closed-Set Accuracy",
     "CCR": r"CCR@$\theta$",
     "NNR": "Nuisance Novelty Rate",
-    "CNR": "Conditional Novelty Rate",
     "ADR": "Accuracy Divergence Rate",
     "OSA_Gap": r"CSA $-$ CCR@$\theta$",
     "OSA": "Open-Set Accuracy",
     "URR": r"URR@$\theta$",
+    # OOD Detection metrics (from COSTARR protocol)
+    "AUOSCR": "AUOSCR",
+    "AUROC": "AUROC",
+    "FPR@95TPR": r"FPR@95\%",
 }
 
 METRIC_SHORT = {
     "CSA": "CSA",
     "CCR": r"CCR@$\theta$",
     "NNR": "NNR",
-    "CNR": "CNR",
     "ADR": "ADR",
     "OSA_Gap": "Gap",
     "OSA": "OSA",
@@ -110,6 +111,52 @@ def load_and_combine_csvs(csv_paths: List[str], filter_datasets: Optional[List[s
     print(f"  Datasets found: {datasets_found}")
 
     return combined
+
+
+def load_summary(csv_path: str) -> pd.DataFrame:
+    """
+    Load bench_summary.csv for summary-level metrics (AUOSCR, AUROC, FPR).
+
+    Summary-level metrics are computed per (backbone, detector, test_dataset, ood_dataset)
+    and cannot be disaggregated to sample level.
+    """
+    df = pd.read_csv(csv_path)
+
+    # Normalize column names
+    if "test_dataset" in df.columns and "dataset" not in df.columns:
+        df["dataset"] = df["test_dataset"]
+
+    return df
+
+
+def get_ood_metrics(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Extract OOD detection metrics from summary data.
+
+    Returns DataFrame with columns:
+        (backbone, detector, dataset, [ood_test_dataset], AUOSCR, AUROC, FPR@95TPR)
+
+    Note: If multiple OOD test datasets were used, results will have one row per
+    (backbone, detector, dataset, ood_test_dataset) combination.
+    """
+    cols = ["backbone", "detector", "dataset"]
+
+    # Handle multiple OOD datasets
+    if "test_ood_dataset" in summary_df.columns:
+        cols.append("test_ood_dataset")
+    elif "ood_test_dataset" in summary_df.columns:
+        cols.append("ood_test_dataset")
+
+    metric_cols = []
+    for m in ["AUOSCR", "AUROC", "FPR@95TPR"]:
+        if m in summary_df.columns:
+            metric_cols.append(m)
+
+    if not metric_cols:
+        return pd.DataFrame()
+
+    available_cols = [c for c in cols + metric_cols if c in summary_df.columns]
+    return summary_df[available_cols].copy()
 
 
 # =============================================================================
@@ -196,7 +243,6 @@ def _compute_derived_metrics(df: pd.DataFrame) -> None:
     df["CSA"] = (CS + NN) / n_total                # Closed-Set Accuracy
     df["CCR"] = CS / n_total                        # Correct Classification Rate @ theta
     df["NNR"] = NN / n_total                        # Nuisance Novelty Rate (prevalence)
-    df["CNR"] = NN / n_correct                      # Conditional Novelty Rate (on correct)
     df["OSA_Gap"] = df["CSA"] - df["CCR"]           # = NNR algebraically
 
     # --- Joint metrics (require OOD constants) ---
@@ -229,9 +275,13 @@ def compute_aggregates(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Detect OOD constants ---
     has_ood = ("n_unknown" in df.columns and "rejected_unknowns" in df.columns)
+    has_ood_dataset = "test_ood_dataset" in df.columns
 
     # --- Pivot outcomes into columns ---
-    possible_groups = ["backbone", "detector", "dataset", "nuisance", "level", "outcome"]
+    possible_groups = ["backbone", "detector", "dataset", "nuisance", "level"]
+    if has_ood_dataset:
+        possible_groups.insert(2, "test_ood_dataset")  # After detector, before dataset
+    possible_groups.append("outcome")
     group_cols = [c for c in possible_groups if c in df.columns]
 
     agg = df.groupby(group_cols).size().unstack(fill_value=0).reset_index()
@@ -241,9 +291,9 @@ def compute_aggregates(df: pd.DataFrame) -> pd.DataFrame:
             agg[col] = 0
 
     # --- Propagate OOD constants ---
-    # These are constant per (backbone, detector), so take first from any matching group
+    # These are constant per (backbone, detector, test_ood_dataset), so take first from any matching group
     if has_ood:
-        ood_key_cols = [c for c in ["backbone", "detector"] if c in df.columns]
+        ood_key_cols = [c for c in ["backbone", "detector", "test_ood_dataset"] if c in df.columns]
         if ood_key_cols:
             ood_constants = df.groupby(ood_key_cols).agg(
                 n_unknown=("n_unknown", "first"),
@@ -290,18 +340,30 @@ def aggregate_over_nuisances(df: pd.DataFrame, group_cols: list) -> pd.DataFrame
 # METRIC ACCESSORS (preserve backbone x detector)
 # =============================================================================
 
-def get_metrics_by_severity(agg_df: pd.DataFrame, dataset: str = None) -> pd.DataFrame:
+def get_metrics_by_severity(agg_df: pd.DataFrame, dataset: str = None,
+                            ood_dataset: str = None) -> pd.DataFrame:
     """
     Get metrics per (backbone, detector, level) for a dataset.
     Aggregates over nuisance types, preserves backbone x detector.
 
-    Returns columns: backbone, detector, dataset, level,
-                     CSA, CCR, NNR, CNR, OSA_Gap, OSA, URR,
+    Parameters
+    ----------
+    agg_df : pd.DataFrame
+        Aggregated data from compute_aggregates.
+    dataset : str, optional
+        Filter to specific dataset (e.g., "ImageNet-LN").
+    ood_dataset : str, optional
+        Filter to specific OOD test dataset (e.g., "NINCO", "OpenImage-O-Test").
+
+    Returns columns: backbone, detector, dataset, [test_ood_dataset], level,
+                     CSA, CCR, NNR, OSA_Gap, OSA, URR,
                      N_total, N_correct, + outcome counts
     """
     df = agg_df.copy()
     if dataset:
         df = df[df["dataset"] == dataset]
+    if ood_dataset and "test_ood_dataset" in df.columns:
+        df = df[df["test_ood_dataset"] == ood_dataset]
 
     if df.empty:
         return pd.DataFrame()
@@ -311,6 +373,8 @@ def get_metrics_by_severity(agg_df: pd.DataFrame, dataset: str = None) -> pd.Dat
         group_cols.append("backbone")
     if "detector" in df.columns:
         group_cols.append("detector")
+    if "test_ood_dataset" in df.columns:
+        group_cols.append("test_ood_dataset")
     if "dataset" in df.columns:
         group_cols.append("dataset")
     group_cols.append("level")
@@ -318,12 +382,24 @@ def get_metrics_by_severity(agg_df: pd.DataFrame, dataset: str = None) -> pd.Dat
     return aggregate_over_nuisances(df, group_cols)
 
 
-def get_mean_metrics(agg_df: pd.DataFrame, dataset: str = None) -> pd.DataFrame:
+def get_mean_metrics(agg_df: pd.DataFrame, dataset: str = None,
+                     ood_dataset: str = None) -> pd.DataFrame:
     """
-    Get mean metrics per (backbone, detector) averaged over severity levels (1-5).
-    Returns one row per (backbone, detector, dataset) combination.
+    Get mean metrics per (backbone, detector, test_ood_dataset) averaged over severity levels (1-5).
+    Returns one row per (backbone, detector, dataset, test_ood_dataset) combination.
+
+    ALL metrics depend on the OOD test dataset because threshold calibration differs.
+
+    Parameters
+    ----------
+    agg_df : pd.DataFrame
+        Aggregated data from compute_aggregates.
+    dataset : str, optional
+        Filter to specific dataset (e.g., "ImageNet-LN").
+    ood_dataset : str, optional
+        Filter to specific OOD test dataset (e.g., "NINCO").
     """
-    per_sev = get_metrics_by_severity(agg_df, dataset)
+    per_sev = get_metrics_by_severity(agg_df, dataset, ood_dataset)
     if per_sev.empty:
         return pd.DataFrame()
 
@@ -335,10 +411,12 @@ def get_mean_metrics(agg_df: pd.DataFrame, dataset: str = None) -> pd.DataFrame:
         base_cols.append("backbone")
     if "detector" in per_sev.columns:
         base_cols.append("detector")
+    if "test_ood_dataset" in per_sev.columns:
+        base_cols.append("test_ood_dataset")
     if "dataset" in per_sev.columns:
         base_cols.append("dataset")
 
-    metric_cols = ["CSA", "CCR", "NNR", "CNR", "OSA_Gap", "OSA", "URR"]
+    metric_cols = ["CSA", "CCR", "NNR", "OSA_Gap", "OSA", "URR"]
     metric_cols = [c for c in metric_cols if c in per_sev.columns]
 
     return per_sev.groupby(base_cols)[metric_cols].mean().reset_index()
@@ -346,7 +424,7 @@ def get_mean_metrics(agg_df: pd.DataFrame, dataset: str = None) -> pd.DataFrame:
 
 def compute_adr(agg_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute ADR for each (backbone, detector, dataset).
+    Compute ADR for each (backbone, detector, dataset, [test_ood_dataset]).
     ADR = slope of OSA_Gap vs severity level.
     """
     if "level" not in agg_df.columns:
@@ -357,6 +435,8 @@ def compute_adr(agg_df: pd.DataFrame) -> pd.DataFrame:
         group_cols.append("backbone")
     if "detector" in agg_df.columns:
         group_cols.append("detector")
+    if "test_ood_dataset" in agg_df.columns:
+        group_cols.append("test_ood_dataset")
     if "dataset" in agg_df.columns:
         group_cols.append("dataset")
     group_cols.append("level")
@@ -387,6 +467,62 @@ def compute_adr(agg_df: pd.DataFrame) -> pd.DataFrame:
 
         result = dict(zip(base_cols, keys if isinstance(keys, tuple) else [keys]))
         result["ADR"] = slope
+        results.append(result)
+
+    return pd.DataFrame(results)
+
+
+def compute_adr_osa(agg_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute ADR_OSA for each (backbone, detector, dataset, [test_ood_dataset]).
+    ADR_OSA = slope of (CSA - OSA) vs severity level.
+
+    This measures how quickly OSA diverges from CSA as severity increases,
+    capturing the open-set degradation rate.
+    """
+    if "level" not in agg_df.columns:
+        return pd.DataFrame()
+
+    group_cols = []
+    if "backbone" in agg_df.columns:
+        group_cols.append("backbone")
+    if "detector" in agg_df.columns:
+        group_cols.append("detector")
+    if "test_ood_dataset" in agg_df.columns:
+        group_cols.append("test_ood_dataset")
+    if "dataset" in agg_df.columns:
+        group_cols.append("dataset")
+    group_cols.append("level")
+
+    per_severity = aggregate_over_nuisances(agg_df, group_cols)
+    subset = per_severity[per_severity["level"].between(1, 5)].copy()
+
+    if subset.empty or "OSA" not in subset.columns:
+        return pd.DataFrame()
+
+    # Compute CSA - OSA gap
+    subset["OSA_CSA_Gap"] = subset["CSA"] - subset["OSA"]
+
+    results = []
+    base_cols = [c for c in group_cols if c != "level"]
+
+    for keys, group in subset.groupby(base_cols):
+        x = group["level"].values
+        y = group["OSA_CSA_Gap"].values
+
+        mask = ~np.isnan(y)
+        if mask.sum() < 2:
+            continue
+
+        x_clean, y_clean = x[mask], y[mask]
+
+        if len(np.unique(x_clean)) < 2:
+            continue
+
+        slope, intercept = np.polyfit(x_clean, y_clean, 1)
+
+        result = dict(zip(base_cols, keys if isinstance(keys, tuple) else [keys]))
+        result["ADR_OSA"] = slope
         results.append(result)
 
     return pd.DataFrame(results)

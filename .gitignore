@@ -1,2 +1,59 @@
-/results/
-/results/nuisance_runs/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Model weights
+*.pth
+*.pt
+checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project-specific
+bench/cars_models/
+ln_dataset/assets/
+cache/
+debug_train/
+
+# Data artifacts (regenerable)
+paper_output/
+*.part
+
+# Large data files (>50MB)
+data/benchmark_imglist/imagenet/train_imagenet.txt
+data/benchmark_imglist/imagenet/train_imagenet_mos.txt
+data/benchmark_imglist/imagenet200/train_imagenet800.txt
+data/images_classic/
+data/images_largescale/
+data/imgmeta/
+data/imagenet_annotations.csv
+data/imagenet_synsets.txt
+analysis/bench_results/
+
+# Archives
+*.zip
+*.tar.gz
+
+# Temporary files
+*.tmp
+*.log
+nul
+
+# Development docs (keep local only)
+claude.md
+CLAUDE.md
+
+# OS files
+.DS_Store
+Thumbs.db
