@@ -114,11 +114,11 @@ The LN framework is dataset-agnostic. Follow these steps to apply it to your own
 
 1. **Image dataset** with train/val splits
 2. **Image list files** (text files with `path label` per line)
-3. **Pretrained classifier backbones** for your dataset (or use ImageNet-pretrained)
+3. **Trained classifier backbones** for your dataset (you must train your own classifiers)
 
 ### Step 1: Create Configuration File
 
-Create a YAML config in `ln_dataset/configs/your_dataset.yaml`:
+Create a YAML config tailored to your dataset in `ln_dataset/configs/your_dataset.yaml`. **The configuration must be customized for your specific dataset** - there is no one-size-fits-all config.
 
 ```yaml
 dataset:
@@ -126,27 +126,27 @@ dataset:
   root: /path/to/your_dataset
   train_list: data/benchmark_imglist/your_dataset/train.txt
   val_list: data/benchmark_imglist/your_dataset/val.txt
-  num_classes: 100  # Number of classes in your dataset
+  num_classes: 100  # Must match your dataset's number of classes
 
 autoencoder:
-  latent_dim: 256
-  epochs: 50
+  latent_dim: 256      # Adjust based on image complexity
+  epochs: 50           # May need more for complex datasets
   batch_size: 64
   learning_rate: 0.001
 
 generation:
-  target_area: 0.33      # Fraction of image to perturb
+  target_area: 0.33      # Fraction of image to perturb (tune for your domain)
   n_sweeps: 50           # Parameter sweep granularity
   n_trials: 2            # Trials per stochastic nuisance
 
 models:
-  use_torchvision: true  # Use torchvision pretrained models
-  backbones:
-    - resnet50
-    - vit_b_16
-    - convnext_t
-    - densenet121
+  use_torchvision: false  # Must train your own classifiers for your dataset
+  backbone_weights:       # Paths to your trained classifier weights
+    resnet50: /path/to/your_trained_resnet50.pth
+    vit_b_16: /path/to/your_trained_vit.pth
 ```
+
+**Important:** You cannot use torchvision pretrained weights directly. The backbone classifiers must be trained on your specific dataset to ensure correct classification before perturbation.
 
 ### Step 2: Create Image List Files
 
@@ -211,23 +211,25 @@ python -m bench.run_bench \
     --out_dir analysis/bench_results/your_dataset
 ```
 
-### What Gets Trained vs. What's Pretrained
+### What Needs to be Trained
 
 | Component | Training Required? | Notes |
 |-----------|-------------------|-------|
-| **Backbone classifiers** | No | Uses torchvision pretrained weights (IMAGENET1K_V1) |
-| **Autoencoder** | Yes | Dataset-specific; learns reconstruction |
-| **PaRCE calibration** | Yes | Per-class reconstruction statistics |
-| **Bin edges** | Yes | Severity level thresholds |
-| **Post-hoc detectors** | Some | KNN, MDS, VIM need ID features; others are zero-shot |
+| **Backbone classifiers** | **Yes** | Must be trained on your dataset; cannot use pretrained weights |
+| **Autoencoder** | **Yes** | Dataset-specific; learns reconstruction patterns |
+| **PaRCE calibration** | **Yes** | Per-class reconstruction error statistics |
+| **Bin edges** | **Yes** | Severity level thresholds for your dataset |
+| **Post-hoc detectors** | Some | KNN, MDS, VIM need ID features extracted from your trained backbones |
 
-### Fine-Grained Classification Datasets
+### Configuration Guidelines
 
-For fine-grained datasets (CUB-200, Stanford Cars, etc.), you may want to:
+When adapting to a new dataset:
 
-1. Use domain-specific pretrained backbones instead of ImageNet weights
-2. Adjust `target_area` in config (smaller regions for fine-grained details)
-3. Increase `n_sweeps` for finer-grained severity levels
+1. **Train backbone classifiers first** - The LN framework requires classifiers that accurately classify your dataset
+2. **Adjust `num_classes`** - Must exactly match your dataset's class count
+3. **Tune `target_area`** - Smaller values (0.2-0.3) for fine-grained datasets, larger (0.3-0.4) for coarse-grained
+4. **Adjust autoencoder parameters** - Complex images may need larger `latent_dim` or more `epochs`
+5. **Calibrate for your domain** - PaRCE and bin edge calibration must be run on your specific dataset
 
 ---
 
