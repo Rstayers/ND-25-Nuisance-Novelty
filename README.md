@@ -60,13 +60,10 @@ See [INSTALL.md](INSTALL.md) for detailed setup instructions.
 ```bash
 # Clone repository
 git clone https://github.com/Rstayers/ND-25-Nuisance-Novelty.git
-cd nuisance-novelty
+cd ND-25-Nuisance-Novelty
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Download model weights
-bash scripts/download_weights.sh
 ```
 
 ## Usage
@@ -107,6 +104,133 @@ python -m analysis.run_report \
 
 See [analysis/README.md](analysis/README.md) for analysis documentation.
 
+---
+
+## Applying to a New Dataset
+
+The LN framework is dataset-agnostic. Follow these steps to apply it to your own dataset:
+
+### Requirements
+
+1. **Image dataset** with train/val splits
+2. **Image list files** (text files with `path label` per line)
+3. **Pretrained classifier backbones** for your dataset (or use ImageNet-pretrained)
+
+### Step 1: Create Configuration File
+
+Create a YAML config in `ln_dataset/configs/your_dataset.yaml`:
+
+```yaml
+dataset:
+  name: your_dataset
+  root: /path/to/your_dataset
+  train_list: data/benchmark_imglist/your_dataset/train.txt
+  val_list: data/benchmark_imglist/your_dataset/val.txt
+  num_classes: 100  # Number of classes in your dataset
+
+autoencoder:
+  latent_dim: 256
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+
+generation:
+  target_area: 0.33      # Fraction of image to perturb
+  n_sweeps: 50           # Parameter sweep granularity
+  n_trials: 2            # Trials per stochastic nuisance
+
+models:
+  use_torchvision: true  # Use torchvision pretrained models
+  backbones:
+    - resnet50
+    - vit_b_16
+    - convnext_t
+    - densenet121
+```
+
+### Step 2: Create Image List Files
+
+Create text files listing images with labels:
+
+```
+# data/benchmark_imglist/your_dataset/train.txt
+class_a/image001.jpg 0
+class_a/image002.jpg 0
+class_b/image001.jpg 1
+...
+
+# data/benchmark_imglist/your_dataset/val.txt
+class_a/image101.jpg 0
+class_b/image101.jpg 1
+...
+```
+
+### Step 3: Train Required Components
+
+```bash
+# 1. Train autoencoder (learns image reconstruction)
+python -m ln_dataset.core.train_ae --config ln_dataset/configs/your_dataset.yaml
+
+# 2. Calibrate PaRCE (per-class reconstruction statistics)
+python -m ln_dataset.core.calibrate_parce --config ln_dataset/configs/your_dataset.yaml
+
+# 3. Calibrate bin edges (severity level thresholds)
+python -m ln_dataset.core.calibrate_bins --config ln_dataset/configs/your_dataset.yaml
+```
+
+### Step 4: Generate LN Dataset
+
+```bash
+python -m ln_dataset.core.generate_ln \
+    --config ln_dataset/configs/your_dataset.yaml \
+    --data /path/to/your_dataset/val \
+    --imglist data/benchmark_imglist/your_dataset/val.txt \
+    --out_dir data/images_largescale/your_dataset_ln
+```
+
+### Step 5: Register Dataset for Benchmarking
+
+Add your dataset to `bench/datasets.py`:
+
+```python
+DATASET_ZOO["YourDataset-LN"] = {
+    "root": "data/images_largescale/your_dataset_ln",
+    "imglist": "data/benchmark_imglist/your_dataset/your_dataset_ln.txt",
+    "parser": parse_ln_manifest,
+    "num_classes": 100,
+    "is_imagenet": False
+}
+```
+
+### Step 6: Run Benchmarks
+
+```bash
+python -m bench.run_bench \
+    --config bench/configs/your_dataset.yaml \
+    --test_datasets YourDataset-LN \
+    --out_dir analysis/bench_results/your_dataset
+```
+
+### What Gets Trained vs. What's Pretrained
+
+| Component | Training Required? | Notes |
+|-----------|-------------------|-------|
+| **Backbone classifiers** | No | Uses torchvision pretrained weights (IMAGENET1K_V1) |
+| **Autoencoder** | Yes | Dataset-specific; learns reconstruction |
+| **PaRCE calibration** | Yes | Per-class reconstruction statistics |
+| **Bin edges** | Yes | Severity level thresholds |
+| **Post-hoc detectors** | Some | KNN, MDS, VIM need ID features; others are zero-shot |
+
+### Fine-Grained Classification Datasets
+
+For fine-grained datasets (CUB-200, Stanford Cars, etc.), you may want to:
+
+1. Use domain-specific pretrained backbones instead of ImageNet weights
+2. Adjust `target_area` in config (smaller regions for fine-grained details)
+3. Increase `n_sweeps` for finer-grained severity levels
+
+---
+
 ## Metrics
 
 | Metric | Description |
@@ -126,7 +250,9 @@ MSP, ODIN, ReAct, ASH, DICE, KNN, MDS, VIM, SHE, EBO, PostMax
 
 ResNet-50, ViT-B/16, Swin-T, DenseNet-121, ConvNeXt-T
 
+---
 
+## References
 
 - Hendrycks, D., & Dietterich, T. (2019). *Benchmarking Neural Network Robustness to Common Corruptions and Perturbations*. ICLR. ([paper](https://arxiv.org/abs/1903.12261))
 - Dünkel, O., et al. (2025). *CNS-Bench: Benchmarking Image Classifier Robustness Under Continuous Nuisance Shifts*. ([paper](https://arxiv.org/abs/2507.17651))
