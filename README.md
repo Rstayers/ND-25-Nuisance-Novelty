@@ -1,7 +1,7 @@
 <h1 align="center">Evaluating Nuisance Novelty to Expose Gaps in<br>Open Set Reliability</h1>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/ECCV-2026-blue.svg" alt="ECCV 2026"></a>
+  <!--<a href="#"><img src="https://img.shields.io/badge/ECCV-2026-blue.svg" alt="ECCV 2026"></a>-->
   <a href="#"><img src="https://img.shields.io/badge/Python-3.8+-green.svg" alt="Python 3.8+"></a>
   <a href="#"><img src="https://img.shields.io/badge/PyTorch-1.10+-orange.svg" alt="PyTorch"></a>
 
